@@ -221,6 +221,30 @@ test("a fast observation refreshes the entry stats", async () => {
   assert.equal(persisted.entries[0]?.failures, 0);
 });
 
+test("real traffic refreshes the binding lease", async () => {
+  const { manager, store, clock } = await harness({
+    state: stateWith(
+      [entry("good-1")],
+      {
+        [key("s1")]: {
+          routedId: "good-1",
+          provider: target.provider,
+          model: target.model,
+          boundAt: 0,
+          lastSeenAt: 0,
+        },
+      },
+    ),
+  });
+  await manager.bind(key("s1"), target, 0);
+
+  clock.value += 60 * 60_000;
+  await manager.observe(key("s1"), { "server-timing": "upstream;dur=1200" }, 200);
+
+  const persisted = await store.load();
+  assert.equal(persisted.bindings[key("s1")]?.lastSeenAt, clock.value);
+});
+
 test("one degraded observation is tolerated, the second evicts", async () => {
   const { manager } = await harness({
     state: stateWith([entry("good-1")]),

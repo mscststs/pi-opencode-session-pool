@@ -299,6 +299,10 @@ export class PoolManager {
     const timing = timingFromHeaders(headers);
     const upstreamMs = timing.upstreamMs;
     const now = this.now();
+    // Real traffic is proof the conversation is alive, so keep its lease fresh.
+    // Without this, a conversation longer than the lease TTL would silently stop
+    // reserving its routed id.
+    binding.lastSeenAt = now;
     const overloaded = status === 429;
     // "degraded" costs one strike; "catastrophic" ejects immediately.
     // The strike threshold is higher than the probe ceiling because a real
@@ -306,7 +310,10 @@ export class PoolManager {
     const degraded = overloaded || (upstreamMs !== undefined && upstreamMs >= this.config.degradeMs);
     const catastrophic = overloaded || (upstreamMs !== undefined && upstreamMs >= this.config.quarantineMs);
 
-    if (upstreamMs === undefined && !overloaded) return;
+    if (upstreamMs === undefined && !overloaded) {
+      await this.persistThrottled();
+      return;
+    }
 
     if (!degraded) {
       entry.failures = 0;
