@@ -1,0 +1,73 @@
+{
+  "name": "@mscststs/pi-opencode-session-pool",
+  "version": "0.1.0",
+  "description": "Pi extension that pins every OpenCode request to a pre-verified fast-routing session id, so a new conversation never lands on OpenCode's overloaded upstream shard.",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "opencode",
+    "opencode-go",
+    "zen",
+    "routing",
+    "session",
+    "ttft",
+    "latency",
+    "performance",
+    "provider"
+  ],
+  "files": [
+    "extensions",
+    "lib",
+    "scripts",
+    "docs",
+    "README.md",
+    "README.zh-CN.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "scripts": {
+    "test": "tsx --test",
+    "test:node": "node --test",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test",
+    "prepublishOnly": "npm run check",
+    "pool:inspect": "node scripts/inspect-pool.mjs",
+    "pool:live": "tsx scripts/live-check.ts",
+    "release:patch": "npm version patch && git push --follow-tags",
+    "release:minor": "npm version minor && git push --follow-tags",
+    "release:major": "npm version major && git push --follow-tags"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.5.0",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mscststs/pi-opencode-session-pool.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mscststs/pi-opencode-session-pool/issues"
+  },
+  "homepage": "https://github.com/mscststs/pi-opencode-session-pool#readme"
+}

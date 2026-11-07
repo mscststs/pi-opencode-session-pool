@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Build output (this package ships TypeScript directly)
+dist/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
