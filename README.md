@@ -9,6 +9,26 @@ relay whose `server-timing` reports `upstream;dur` of 10-43 s instead of ~1 s â€
 and a slow conversation stays slow for its whole life. pi generates a fresh
 random id per conversation, so every new session is a coin flip.
 
+## Install
+
+```bash
+# from npm
+pi install npm:@mscststs/pi-opencode-session-pool
+
+# or from git
+pi install git:github.com/mscststs/pi-opencode-session-pool
+
+# try it for one run without adding it to settings
+pi -e npm:@mscststs/pi-opencode-session-pool
+```
+
+- npm: <https://www.npmjs.com/package/@mscststs/pi-opencode-session-pool>
+- source: <https://github.com/mscststs/pi-opencode-session-pool>
+
+From a source checkout, `pi install ~/repo/pi-opencode-session-pool` loads it in
+place instead (no copy). `pi list` shows the package; `/reload` picks up changes
+without restarting.
+
 This extension verifies ids before they are used, keeps the fast ones in a
 durable pool, and rewrites the header right before the request leaves the
 process.
@@ -89,18 +109,6 @@ Everything degrades safely: missing credentials, a corrupt state file, a
 network error, a rate limit or a 20 s stall all fall back to pi's own id and
 never throw into the request path. If the pool file cannot be written, routing
 still works from memory.
-
-## Install
-
-```bash
-# local checkout (loaded in place, no copy)
-pi install ~/repo/pi-opencode-session-pool
-
-# or from git / npm once published
-pi install git:github.com/<you>/pi-opencode-session-pool@v0.1.0
-```
-
-`pi list` shows it; `/reload` picks up changes without restarting.
 
 ## Configuration
 

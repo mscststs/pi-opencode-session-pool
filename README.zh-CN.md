@@ -8,6 +8,25 @@ OpenCode 网关会按这个请求头做一致性哈希，选中某个上游分�
 `upstream;dur` 是 10–43 秒而不是 1 秒左右，而且这个会话会一直慢下去。pi 每个新
 会话都会生成随机 id，所以每次开新会话都是掷硬币。
 
+## 安装
+
+```bash
+# 从 npm 安装
+pi install npm:@mscststs/pi-opencode-session-pool
+
+# 或者从 git 安装
+pi install git:github.com/mscststs/pi-opencode-session-pool
+
+# 只在本次运行试用，不写入配置
+pi -e npm:@mscststs/pi-opencode-session-pool
+```
+
+- npm：<https://www.npmjs.com/package/@mscststs/pi-opencode-session-pool>
+- 源码：<https://github.com/mscststs/pi-opencode-session-pool>
+
+本地源码目录也可以直接 `pi install ~/repo/pi-opencode-session-pool` 原地加载（不复制）。
+`pi list` 可查看已安装包，`/reload` 可热加载。
+
 本扩展的做法：先用 1-token 的真实探测请求筛选 id，把快的放进持久化池子，然后在
 请求发出前改写请求头。
 
@@ -75,18 +94,6 @@ server-timing: gateway;dur=10, upstream;dur=1447, total;dur=1498
 
 所有失败路径都安全降级：缺凭证、状态文件损坏、网络错误、429 限流、20 秒卡顿，都会
 回落到 pi 自己的 id，绝不向请求链路抛错。状态文件写失败也不影响内存中的路由。
-
-## 安装
-
-```bash
-# 本地目录（原地加载，不复制）
-pi install ~/repo/pi-opencode-session-pool
-
-# 已发布后也可以
-pi install git:github.com/<you>/pi-opencode-session-pool@v0.1.0
-```
-
-`pi list` 可查看，`/reload` 可热加载。
 
 ## 配置
 

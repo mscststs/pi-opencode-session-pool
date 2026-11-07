@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-07
+
+### Changed
+
+- README: the install section now sits at the top of both language versions and
+  points at the published npm package
+  (`pi install npm:@mscststs/pi-opencode-session-pool`) and the real GitHub
+  repository (`pi install git:github.com/mscststs/pi-opencode-session-pool`)
+  instead of a `<you>` placeholder.
+
 ## [0.1.2] - 2026-11-07
 
 ### Fixed
