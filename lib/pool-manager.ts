@@ -292,7 +292,9 @@ export class PoolManager {
     const now = this.now();
     const overloaded = status === 429;
     // "degraded" costs one strike; "catastrophic" ejects immediately.
-    const degraded = overloaded || (upstreamMs !== undefined && upstreamMs > this.config.maxUpstreamMs);
+    // The strike threshold is higher than the probe ceiling because a real
+    // request also pays prompt prefill; only pathological values count.
+    const degraded = overloaded || (upstreamMs !== undefined && upstreamMs >= this.config.degradeMs);
     const catastrophic = overloaded || (upstreamMs !== undefined && upstreamMs >= this.config.quarantineMs);
 
     if (upstreamMs === undefined && !overloaded) return;

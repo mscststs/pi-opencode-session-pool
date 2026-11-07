@@ -146,11 +146,16 @@ conversation references it and was touched within `PI_OCPOOL_LEASE_TTL_MS`.
 
 `after_provider_response` feeds every real response back:
 
-- `upstream;dur <= maxUpstreamMs`: reset `failures`, refresh `upstreamMs` and
-  `verifiedAt` (persisted at most every 5 s).
-- `upstream;dur > maxUpstreamMs`: one strike.
-- `upstream;dur >= quarantineMs` or HTTP 429: immediate eviction.
-- `failures >= quarantineFailures`: eviction on the next degraded response.
+- `upstream;dur < degradeMs` (default 6 s): reset `failures`, refresh
+  `upstreamMs`/`verifiedAt` (persisted at most every 5 s).
+- `upstream;dur >= degradeMs`: one strike.
+- `upstream;dur >= quarantineMs` (default 8 s) or HTTP 429: immediate eviction.
+- `failures >= quarantineFailures`: eviction on the next strike.
+
+`degradeMs` is deliberately higher than the probe ceiling (`maxUpstreamMs`,
+2.5 s): a real request also pays prompt prefill, so a healthy id on a long
+conversation can report 3-5 s. Only a clearly pathological value earns a
+strike, and only the 10-43 s failure mode is ejected outright.
 
 Eviction drops the entry and every binding that referenced it. The next request
 in that conversation is unbound, so `before_provider_headers` binds again — from
@@ -205,3 +210,6 @@ surface: it observes the real response headers and only rewrites one header.
   the first request (`PI_OCPOOL_REQUEST_BUDGET_MS`).
 - `PI_OCPOOL_REQUIRE_GATEWAY_ID=0` relaxes classification to latency only, which
   is useful if OpenCode renames its response id prefixes.
+- Raise `PI_OCPOOL_DEGRADE_MS` if you routinely work with very large contexts
+  (where several seconds of prefill is normal); lower it if you want the pool
+  to react to milder degradation.

@@ -95,14 +95,15 @@ All settings are environment variables (same convention as the sibling
 | `PI_OCPOOL` | `1` | Master switch. `0` disables the extension entirely. |
 | `PI_OCPOOL_SIZE` | `3` | Verified-fast ids kept per provider+model (`1`-`16`). |
 | `PI_OCPOOL_TTL_MS` | `1800000` | Re-verify pooled ids older than this. |
-| `PI_OCPOOL_MAX_UPSTREAM_MS` | `2500` | Latency ceiling that still counts as "fast". |
+| `PI_OCPOOL_MAX_UPSTREAM_MS` | `2500` | Probe ceiling that still counts as "fast". |
 | `PI_OCPOOL_PROBE_TIMEOUT_MS` | `10000` | Abort one probe after this; slow ids take much longer. |
 | `PI_OCPOOL_STARTUP_BUDGET_MS` | `6000` | Max time `session_start` may spend binding. `0` = never block. |
 | `PI_OCPOOL_REQUEST_BUDGET_MS` | `4000` | Max time the first request may spend binding. |
 | `PI_OCPOOL_REFRESH_INTERVAL_MS` | `300000` | Background refresh cadence. `0` disables the timer. |
 | `PI_OCPOOL_MIN_PROBE_INTERVAL_MS` | `750` | Minimum spacing between probes. |
 | `PI_OCPOOL_LEASE_TTL_MS` | `28800000` | Idle time after which a binding releases its id. |
-| `PI_OCPOOL_QUARANTINE_FAILURES` | `2` | Degraded observations before an id is evicted. |
+| `PI_OCPOOL_QUARANTINE_FAILURES` | `2` | Degraded real requests before an id is evicted. |
+| `PI_OCPOOL_DEGRADE_MS` | `6000` | Real-request upstream latency that counts as one strike. |
 | `PI_OCPOOL_QUARANTINE_MS` | `8000` | One-shot latency that evicts immediately. |
 | `PI_OCPOOL_MAX_BINDINGS` | `256` | Cap on persisted bindings. |
 | `PI_OCPOOL_REQUIRE_GATEWAY_ID` | `1` | Require the response `id` to start with `gw-`. |
@@ -148,7 +149,7 @@ npm run pool:live -- --seed   # probe and append the fast ids to the pool
 
 ```bash
 npm install
-npm run check        # typecheck + 55 unit tests
+npm run check        # typecheck + 56 unit tests
 npm run pool:live    # optional: real gateway smoke test
 ```
 

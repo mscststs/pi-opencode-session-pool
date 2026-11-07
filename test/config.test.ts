@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  DEFAULT_DEGRADE_MS,
   DEFAULT_LEASE_TTL_MS,
   DEFAULT_MAX_UPSTREAM_MS,
   DEFAULT_MIN_PROBE_INTERVAL_MS,
@@ -27,6 +28,7 @@ test("defaults: enabled, three ids, short probe timeout", () => {
   assert.equal(config.minProbeIntervalMs, DEFAULT_MIN_PROBE_INTERVAL_MS);
   assert.equal(config.leaseTtlMs, DEFAULT_LEASE_TTL_MS);
   assert.equal(config.quarantineFailures, DEFAULT_QUARANTINE_FAILURES);
+  assert.equal(config.degradeMs, DEFAULT_DEGRADE_MS);
   assert.equal(config.requireGatewayId, true);
   assert.equal(config.debug, false);
   assert.equal(config.statePath, "/home/tester/.pi/opencode-session-pool.json");
@@ -57,6 +59,8 @@ test("numeric options are parsed, clamped and validated", () => {
 
   assert.equal(readConfig({ PI_OCPOOL_QUARANTINE_FAILURES: "0" }).quarantineFailures, 1);
   assert.equal(readConfig({ PI_OCPOOL_QUARANTINE_FAILURES: "99" }).quarantineFailures, 10);
+  assert.equal(readConfig({ PI_OCPOOL_DEGRADE_MS: "7000" }).degradeMs, 7000);
+  assert.equal(readConfig({ PI_OCPOOL_DEGRADE_MS: "1" }).degradeMs, 1000);
   assert.equal(readConfig({ PI_OCPOOL_MAX_BINDINGS: "1" }).maxBindings, 8);
 
   assert.equal(readConfig({ PI_OCPOOL_TTL_MS: "1" }).ttlMs, 60_000);

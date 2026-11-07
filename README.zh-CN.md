@@ -84,14 +84,15 @@ pi install git:github.com/<you>/pi-opencode-session-pool@v0.1.0
 | `PI_OCPOOL` | `1` | 总开关，`0` 完全关闭 |
 | `PI_OCPOOL_SIZE` | `3` | 每个 provider+model 保留的快 id 数（1–16） |
 | `PI_OCPOOL_TTL_MS` | `1800000` | 超过该时长的条目重新验证 |
-| `PI_OCPOOL_MAX_UPSTREAM_MS` | `2500` | 判定“快”的 upstream 上限 |
+| `PI_OCPOOL_MAX_UPSTREAM_MS` | `2500` | 探测时判定“快”的 upstream 上限 |
 | `PI_OCPOOL_PROBE_TIMEOUT_MS` | `10000` | 单个探测的超时；慢 id 远不止这么久 |
 | `PI_OCPOOL_STARTUP_BUDGET_MS` | `6000` | `session_start` 最多阻塞多久；`0` 表示不阻塞 |
 | `PI_OCPOOL_REQUEST_BUDGET_MS` | `4000` | 首个请求最多阻塞多久 |
 | `PI_OCPOOL_REFRESH_INTERVAL_MS` | `300000` | 后台刷新间隔，`0` 关闭定时器 |
 | `PI_OCPOOL_MIN_PROBE_INTERVAL_MS` | `750` | 两次探测的最小间隔 |
 | `PI_OCPOOL_LEASE_TTL_MS` | `28800000` | 绑定空闲多久后释放占用的 id |
-| `PI_OCPOOL_QUARANTINE_FAILURES` | `2` | 连续几次“变慢”后隔离 |
+| `PI_OCPOOL_QUARANTINE_FAILURES` | `2` | 真实请求连续几次“变慢”后隔离 |
+| `PI_OCPOOL_DEGRADE_MS` | `6000` | 真实请求达到该延迟记一次“变慢” |
 | `PI_OCPOOL_QUARANTINE_MS` | `8000` | 单次超过该延迟直接隔离 |
 | `PI_OCPOOL_MAX_BINDINGS` | `256` | 绑定表上限 |
 | `PI_OCPOOL_REQUIRE_GATEWAY_ID` | `1` | 要求响应 `id` 以 `gw-` 开头 |
@@ -129,7 +130,7 @@ npm run pool:live -- --seed   # 探测并把快 id 写入池子
 
 ```bash
 npm install
-npm run check        # 类型检查 + 55 个单测
+npm run check        # 类型检查 + 56 个单测
 npm run pool:live    # 可选：真实网关冒烟测试
 ```
 

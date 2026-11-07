@@ -33,7 +33,7 @@ import { createLogger, type Logger } from "../lib/logger.ts";
 import { PoolManager } from "../lib/pool-manager.ts";
 import { PoolStore } from "../lib/pool-store.ts";
 import { createProber } from "../lib/probe.ts";
-import { bindingKey, isOpenCodeModel, resolveTarget } from "../lib/targets.ts";
+import { bindingKey, isOpenCodeModel, resolveTarget, supportsProbing } from "../lib/targets.ts";
 import type { ProbeTarget } from "../lib/types.ts";
 
 const MANAGER_KEY = Symbol.for("pi-opencode-session-pool.manager");
@@ -126,12 +126,22 @@ export default function opencodeSessionPool(pi: ExtensionAPI): void {
 
   pi.on("before_provider_headers", async (event, ctx) => {
     try {
-      const target = await resolveTargetFor(ctx, ctx.model);
-      if (!target) return;
+      const model = ctx.model;
+      if (!model || !supportsProbing(model)) return;
 
+      // Hot path: the conversation is already bound, so no auth resolution and
+      // no async work is needed before the header is written.
+      const key = sessionKey(ctx, model.provider, model.id);
+      const bound = manager.peek(key);
+      if (bound) {
+        event.headers[SESSION_HEADER] = bound;
+        return;
+      }
+
+      const target = await resolveTargetFor(ctx, model);
+      if (!target) return;
       manager.registerTarget(target);
-      const key = sessionKey(ctx, target.provider, target.model);
-      const routed = manager.peek(key) ?? (await manager.bind(key, target, config.requestBudgetMs));
+      const routed = await manager.bind(key, target, config.requestBudgetMs);
       if (routed) event.headers[SESSION_HEADER] = routed;
     } catch (error) {
       // Never break a request because of routing.
@@ -142,7 +152,7 @@ export default function opencodeSessionPool(pi: ExtensionAPI): void {
   pi.on("after_provider_response", (event, ctx) => {
     try {
       const model = ctx.model;
-      if (!model || !isOpenCodeModel(model)) return;
+      if (!model || !supportsProbing(model)) return;
       void manager.observe(sessionKey(ctx, model.provider, model.id), event.headers, event.status);
     } catch (error) {
       log.debug(`after_provider_response failed: ${(error as Error)?.message ?? String(error)}`);

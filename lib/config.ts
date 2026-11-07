@@ -42,6 +42,15 @@ export const DEFAULT_LEASE_TTL_MS = 8 * 60 * 60_000;
 /** Evict an entry after this many consecutive slow observations. */
 export const DEFAULT_QUARANTINE_FAILURES = 2;
 
+/**
+ * Real-request upstream latency that counts as one strike.
+ *
+ * Higher than the probe ceiling on purpose: a real request includes prompt
+ * prefill, so a healthy id can legitimately report a few seconds on a long
+ * conversation. Only a clearly pathological value earns a strike.
+ */
+export const DEFAULT_DEGRADE_MS = 6_000;
+
 /** Upstream latency that immediately quarantines an entry, regardless of history. */
 export const DEFAULT_QUARANTINE_MS = 8_000;
 
@@ -77,6 +86,8 @@ export interface PoolConfig {
   leaseTtlMs: number;
   /** Consecutive slow observations before quarantine. */
   quarantineFailures: number;
+  /** Real-request upstream latency that counts as one strike. */
+  degradeMs: number;
   /** Single-observation latency that quarantines immediately. */
   quarantineMs: number;
   /** Maximum number of persisted bindings. */
@@ -121,6 +132,7 @@ function isFalsy(value: string | undefined): boolean {
  * | `PI_OCPOOL_MIN_PROBE_INTERVAL_MS` | `750`                       | Minimum spacing between probes.             |
  * | `PI_OCPOOL_LEASE_TTL_MS`          | `28800000`                  | Idle time before a binding releases its id. |
  * | `PI_OCPOOL_QUARANTINE_FAILURES`   | `2`                         | Slow hits before an id is evicted.          |
+ * | `PI_OCPOOL_DEGRADE_MS`            | `6000`                      | Real upstream latency that counts as a hit. |
  * | `PI_OCPOOL_QUARANTINE_MS`         | `8000`                      | One-shot latency that evicts immediately.   |
  * | `PI_OCPOOL_MAX_BINDINGS`          | `256`                       | Cap on persisted bindings.                  |
  * | `PI_OCPOOL_REQUIRE_GATEWAY_ID`    | `1`                         | Require `id` starting with `gw-`.           |
@@ -159,6 +171,7 @@ export function readConfig(env: Env = process.env, home: string = homedir()): Po
       1,
       10,
     ),
+    degradeMs: Math.max(1_000, parseInteger(env.PI_OCPOOL_DEGRADE_MS, DEFAULT_DEGRADE_MS)),
     quarantineMs: Math.max(
       1_000,
       parseInteger(env.PI_OCPOOL_QUARANTINE_MS, DEFAULT_QUARANTINE_MS),

@@ -223,15 +223,31 @@ test("a fast observation refreshes the entry stats", async () => {
 test("one degraded observation is tolerated, the second evicts", async () => {
   const { manager } = await harness({
     state: stateWith([entry("good-1")]),
-    config: { quarantineFailures: 2, quarantineMs: 20_000 },
+    config: { quarantineFailures: 2, degradeMs: 6_000, quarantineMs: 20_000 },
   });
   await manager.bind(key("s1"), target, 0);
 
-  await manager.observe(key("s1"), { "server-timing": "upstream;dur=3000" }, 200);
-  assert.equal(manager.peek(key("s1")), "good-1", "3000ms is degraded but not catastrophic");
+  await manager.observe(key("s1"), { "server-timing": "upstream;dur=7000" }, 200);
+  assert.equal(manager.peek(key("s1")), "good-1", "7000ms is a strike but not catastrophic");
 
-  await manager.observe(key("s1"), { "server-timing": "upstream;dur=3100" }, 200);
+  await manager.observe(key("s1"), { "server-timing": "upstream;dur=7100" }, 200);
   assert.equal(manager.peek(key("s1")), undefined);
+});
+
+test("ordinary prefill latency is not a strike", async () => {
+  const { manager } = await harness({
+    state: stateWith([entry("good-1")]),
+    config: { degradeMs: 6_000, quarantineMs: 8_000, quarantineFailures: 2 },
+  });
+  await manager.bind(key("s1"), target, 0);
+
+  for (const upstream of [2600, 3400, 5100]) {
+    await manager.observe(key("s1"), { "server-timing": `upstream;dur=${upstream}` }, 200);
+    assert.equal(manager.peek(key("s1")), "good-1", `${upstream}ms is normal prefill`);
+  }
+
+  await manager.observe(key("s1"), { "server-timing": "upstream;dur=9000" }, 200);
+  assert.equal(manager.peek(key("s1")), undefined, "9000ms is catastrophic");
 });
 
 test("an overloaded (429) response evicts immediately", async () => {
