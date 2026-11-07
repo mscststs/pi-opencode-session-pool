@@ -416,6 +416,48 @@ test("concurrent binds share a single acquisition", async () => {
   assert.deepEqual(calls, ["cand-1"]);
 });
 
+test("two processes cannot take the same spare", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-ocpool-race-"));
+  const statePath = join(dir, "state.json");
+  const clock = { value: NOW };
+  const now = () => clock.value;
+  await new PoolStore({ path: statePath, now }).save(stateWith([spare("spare-1")]));
+
+  const build = (seed: number) => {
+    let counter = 0;
+    const prober: Prober = {
+      async probe() {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return { fast: true, status: 200, reason: "fast", upstreamMs: 900 };
+      },
+    };
+    const manager = new PoolManager({
+      config: makeConfig(),
+      store: new PoolStore({ path: statePath, now }),
+      prober,
+      now,
+      randomId: () => `p${seed}-${++counter}`,
+      sleep: async () => {},
+    });
+    manager.registerTarget(target);
+    return manager;
+  };
+
+  const first = build(1);
+  const second = build(2);
+  const [idA, idB] = await Promise.all([
+    first.bind(key("s1"), target, 5_000),
+    second.bind(key("s2"), target, 5_000),
+  ]);
+
+  assert.ok(idA && idB);
+  assert.notEqual(idA, idB, "the single spare may only be taken once");
+
+  const persisted = await new PoolStore({ path: statePath, now }).load();
+  const routed = Object.values(persisted.bindings).map((binding) => binding.routedId);
+  assert.equal(new Set(routed).size, routed.length, "no routed id is owned twice");
+});
+
 test("bind never rejects even when storage explodes", async () => {
   const { manager } = await harness({ plan: [{ fast: true }] });
   (manager as unknown as { store: { load: () => Promise<never> } }).store.load = async () => {

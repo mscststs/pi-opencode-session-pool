@@ -50,6 +50,9 @@ const TOUCH_INTERVAL_MS = 30_000;
  */
 const MIN_PROBE_BUDGET_MS = 1_500;
 
+/** Bounded retries when another process keeps taking the spare we picked. */
+const MAX_TAKE_ATTEMPTS = 3;
+
 export interface PoolManagerDeps {
   config: PoolConfig;
   store: PoolStore;
@@ -247,9 +250,15 @@ export class PoolManager {
     }
 
     // 2. Take a spare that was verified within the TTL: no probe at all.
-    const spare = this.pickSpare(target, now, true);
-    if (spare) {
-      await this.take(key, target, spare);
+    //    `take` re-checks the spare under the state lock, so a concurrent pi
+    //    process that grabbed it first just sends us to the next candidate.
+    for (let attempt = 0; attempt < MAX_TAKE_ATTEMPTS; attempt += 1) {
+      const spare = this.pickSpare(target, this.now(), true);
+      if (!spare) break;
+      if (!(await this.take(key, target, spare))) {
+        this.log.debug(`spare ${spare.id} was taken by another process; retrying`);
+        continue;
+      }
       this.log.debug(
         `took spare id=${spare.id} upstream=${Math.round(spare.upstreamMs)}ms for ${target.provider}/${target.model}`,
       );
@@ -262,18 +271,22 @@ export class PoolManager {
     if (stale) {
       const result = await this.probeWithin(stale.id, target, budgetMs);
       if (result.fast) {
-        await this.take(key, target, {
+        const verified: PoolEntry = {
           ...stale,
           upstreamMs: result.upstreamMs ?? stale.upstreamMs,
           verifiedAt: this.now(),
-        });
-        this.log.debug(`took re-verified spare id=${stale.id} upstream=${result.upstreamMs ?? "?"}ms`);
-        return stale.id;
+        };
+        if (await this.take(key, target, verified)) {
+          this.log.debug(`took re-verified spare id=${stale.id} upstream=${result.upstreamMs ?? "?"}ms`);
+          return stale.id;
+        }
+        this.log.debug(`stale spare ${stale.id} was taken by another process`);
+      } else {
+        await this.dropSpare(stale);
+        this.log.debug(`dropped stale spare ${stale.id} (${result.reason})`);
+        // Rejected credentials or an active 429 backoff: more probes cannot help.
+        if (this.isTerminal(result) || result.reason === "overloaded") return undefined;
       }
-      await this.dropSpare(stale);
-      this.log.debug(`dropped stale spare ${stale.id} (${result.reason})`);
-      // Rejected credentials or an active 429 backoff: more probes cannot help.
-      if (this.isTerminal(result) || result.reason === "overloaded") return undefined;
     }
 
     // 4. Probe fresh candidates until one is fast.
@@ -317,7 +330,7 @@ export class PoolManager {
       const id = this.randomId();
       const result = await this.prober.probe(id, target, deadline - now);
       if (result.fast) {
-        await this.take(key, target, {
+        await this.bindNew(key, target, {
           id,
           provider: target.provider,
           model: target.model,
@@ -465,29 +478,50 @@ export class PoolManager {
     return { ...result, id: candidate };
   }
 
-  /** Hand `entry` to `key` and remove it from the pool. */
-  private async take(key: string, target: ProbeTarget, entry: PoolEntry): Promise<void> {
+  /**
+   * Hand `entry` to `key` and remove it from the pool.
+   *
+   * The removal and the binding are written in one locked mutation, and the
+   * spare is re-checked against the freshest state: if another pi process took
+   * it first this returns `false` and the caller falls back to probing.
+   */
+  private async take(key: string, target: ProbeTarget, entry: PoolEntry): Promise<boolean> {
+    let won = false;
     await this.mutate((draft) => {
-      draft.entries = draft.entries.filter(
+      const index = draft.entries.findIndex(
         (candidate) =>
-          !(
-            candidate.id === entry.id &&
-            candidate.provider === target.provider &&
-            candidate.model === target.model
-          ),
+          candidate.id === entry.id &&
+          candidate.provider === target.provider &&
+          candidate.model === target.model,
       );
-      draft.bindings[key] = {
-        routedId: entry.id,
-        provider: target.provider,
-        model: target.model,
-        boundAt: this.now(),
-        lastSeenAt: this.now(),
-        upstreamMs: entry.upstreamMs,
-        verifiedAt: entry.verifiedAt,
-        failures: 0,
-      };
+      if (index < 0) return;
+      draft.entries.splice(index, 1);
+      this.putOwned(draft, key, target, entry);
+      won = true;
+    });
+    if (won) this.scheduleRefill();
+    return won;
+  }
+
+  /** Bind an id that was just probed (it never entered the pool). */
+  private async bindNew(key: string, target: ProbeTarget, entry: PoolEntry): Promise<void> {
+    await this.mutate((draft) => {
+      this.putOwned(draft, key, target, entry);
     });
     this.scheduleRefill();
+  }
+
+  private putOwned(draft: PoolState, key: string, target: ProbeTarget, entry: PoolEntry): void {
+    draft.bindings[key] = {
+      routedId: entry.id,
+      provider: target.provider,
+      model: target.model,
+      boundAt: this.now(),
+      lastSeenAt: this.now(),
+      upstreamMs: entry.upstreamMs,
+      verifiedAt: entry.verifiedAt,
+      failures: 0,
+    };
   }
 
   private async retireBinding(key: string, binding: Binding): Promise<void> {

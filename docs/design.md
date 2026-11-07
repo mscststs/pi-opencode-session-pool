@@ -117,7 +117,9 @@ random UUIDs); the only cost is one probe per new conversation, which is what
   URL never leaves stale endpoints behind.
 - Writes are atomic (`write temp` + `rename`) and re-read the file before
   changing it, so multiple pi processes merge instead of clobbering each other.
-  Mutations inside one process are serialized through a promise chain.
+  Mutations inside one process are serialized through a promise chain, and
+  across processes by an exclusive `<path>.lock` file (`open(..., "wx")`, stale
+  after 10 s, bounded 3 s wait so routing never stalls).
 - A corrupt file is renamed to `<path>.corrupt-<epoch>` and treated as empty.
 - `PI_OCPOOL_MAX_BINDINGS` caps the binding table; the oldest idle bindings are
   dropped first.
@@ -151,8 +153,9 @@ acquire(key, target, budgetMs):
   return undefined            # caller keeps pi's id
 ```
 
-`take()` removes the spare from `entries` in the same mutation that writes the
-binding, so a crash can never leave an id in both places.
+`take()` removes the spare from `entries` in the same locked mutation that
+writes the binding and re-checks that the spare is still there, so neither a
+crash nor a second pi process can put one id in two conversations.
 
 Concurrency details:
 

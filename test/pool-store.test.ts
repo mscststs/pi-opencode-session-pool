@@ -123,6 +123,27 @@ test("mutate merges with a concurrent writer instead of clobbering", async () =>
   ]);
 });
 
+test("concurrent mutations from two stores never lose an update", async () => {
+  const store = await tempStore();
+  const other = new PoolStore({ path: store.path });
+  await store.save(emptyState());
+
+  // Both read-modify-write cycles overlap, exactly like two pi processes.
+  await Promise.all([
+    store.mutate(async (state) => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      state.entries.push(entry("gw-a"));
+    }),
+    other.mutate(async (state) => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      state.entries.push(entry("gw-b"));
+    }),
+  ]);
+
+  const persisted = JSON.parse(await readFile(store.path, "utf8"));
+  assert.deepEqual(persisted.entries.map((item: { id: string }) => item.id).sort(), ["gw-a", "gw-b"]);
+});
+
 test("concurrent mutations in one process are serialized", async () => {
   const store = await tempStore();
   await store.save(emptyState());

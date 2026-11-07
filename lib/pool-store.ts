@@ -13,7 +13,7 @@
  * A corrupt file is moved aside (`.corrupt-<epoch>`) rather than deleted, so a
  * bad write never permanently breaks the extension.
  */
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { Binding, PoolEntry, PoolState } from "./types.ts";
 
@@ -26,6 +26,12 @@ export interface StoreFs {
   mkdir(path: string, options: { recursive: true }): Promise<unknown>;
   unlink(path: string): Promise<void>;
 }
+
+/** How long a writer waits for the cross-process lock before proceeding anyway. */
+const LOCK_TIMEOUT_MS = 3_000;
+
+/** A lock file older than this is considered abandoned by a crashed process. */
+const LOCK_STALE_MS = 10_000;
 
 const defaultFs: StoreFs = {
   readFile: (path, encoding) => readFile(path, encoding),
@@ -196,6 +202,12 @@ export class PoolStore {
   /**
    * Apply `change` to the freshest state and persist the result.
    *
+   * The whole read-modify-write runs under an exclusive lock file, so two pi
+   * processes cannot both observe the same spare and hand it to two
+   * conversations. The lock is advisory and bounded: a stale lock from a
+   * crashed process is reclaimed, and if the lock cannot be taken within
+   * `LOCK_TIMEOUT_MS` the write proceeds anyway (routing must not stall).
+   *
    * The returned state is what was written. If saving fails the in-memory
    * change is still returned to the caller so routing keeps working; only
    * durability is lost.
@@ -219,9 +231,53 @@ export class PoolStore {
       return next;
     };
 
-    const pending = this.queue.then(run, run);
+    const pending = this.queue.then(
+      () => this.withLock(run),
+      () => this.withLock(run),
+    );
     this.queue = pending.catch(() => undefined);
     return pending;
+  }
+
+  /**
+   * Run `work` while holding `<path>.lock`.
+   *
+   * `open(..., "wx")` is atomic on every platform, which makes the lock file a
+   * usable cross-process mutex without extra dependencies.
+   */
+  private async withLock<T>(work: () => Promise<T>): Promise<T> {
+    const lockPath = `${this.path}.lock`;
+    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+
+    for (;;) {
+      let handle;
+      try {
+        await this.fs.mkdir(dirname(this.path), { recursive: true });
+        handle = await open(lockPath, "wx");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") return work();
+        await this.reclaimStaleLock(lockPath);
+        if (Date.now() > deadline) return work();
+        await new Promise((resolve) => setTimeout(resolve, 10 + Math.random() * 20));
+        continue;
+      }
+
+      try {
+        return await work();
+      } finally {
+        await handle.close().catch(() => {});
+        await unlink(lockPath).catch(() => {});
+      }
+    }
+  }
+
+  private async reclaimStaleLock(lockPath: string): Promise<void> {
+    try {
+      const info = await stat(lockPath);
+      if (Date.now() - info.mtimeMs > LOCK_STALE_MS) await unlink(lockPath);
+    } catch {
+      // Already gone or unreadable: the next attempt will tell.
+    }
   }
 
   private async quarantineCorruptFile(): Promise<void> {

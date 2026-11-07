@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-07
+
+### Fixed
+
+- Two pi processes could take the same spare when they started at the same
+  moment. `take()` now re-checks the spare inside a cross-process lock file and
+  falls back to probing when another process won.
+- `PoolStore.mutate()` holds `${statePath}.lock` across its read-modify-write,
+  so concurrent writers merge instead of losing updates. The lock is reclaimed
+  after 10 s (crashed process) and never blocks routing for more than 3 s.
+
 ## [0.1.0] - 2026-11-07
 
 ### Added
