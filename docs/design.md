@@ -109,11 +109,13 @@ acquire(key, target, budgetMs):
   deadline = now + budgetMs
   while now < deadline:
       wait until (minProbeIntervalMs and any 429 backoff) elapse
+      if inside a 429 backoff that outlives the deadline: stop probing
       id = randomUUID()
       result = probe(id, target, deadline - now)
       if result.fast: add entry, bind(key, id); return id
       if result.unauthorized / rejected: stop probing
       if result.overloaded: back off for retryAfterMs
+      if remaining < MIN_PROBE_BUDGET_MS (1.5 s): stop probing
   return undefined            # caller keeps pi's id
 ```
 
@@ -126,6 +128,10 @@ Concurrency details:
   caller's deadline.
 - Budgets are enforced twice: before each probe and as the probe's own abort
   timeout, so a 40 s slow shard cannot blow the budget.
+- A probe is never started with less than 1.5 s of budget left: a healthy shard
+  answers in 0.8-2.0 s, so a shorter timeout would discard a good id.
+- `Retry-After` is never ignored. If the gateway's backoff window outlives the
+  budget, acquisition stops and pi's session id is used for that request.
 
 ## 5. Leasing
 
@@ -187,7 +193,7 @@ with the first request for the rate limit.
 | State file unwritable | Routing continues from memory; only durability is lost |
 | All probes time out | `bind()` returns `undefined`; pi's session id is used |
 | 401/403/400 | Probing stops for that target to avoid hammering a rejected key |
-| 429 | Honours `retry-after-ms`/`Retry-After`, then retries inside the budget |
+| 429 overloaded | Honours `retry-after-ms`/`Retry-After`; never probes inside that window |
 | Model registry throws | Caught in the hook; the request proceeds untouched |
 | Extension reload | Manager is a `globalThis` singleton, so the pool and timer survive |
 | Two pi processes | Atomic, merge-on-write state file keeps pools consistent |

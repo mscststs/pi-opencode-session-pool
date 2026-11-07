@@ -38,8 +38,14 @@ const PERSIST_INTERVAL_MS = 5_000;
 /** Never persist a binding touch more often than this. */
 const TOUCH_INTERVAL_MS = 30_000;
 
-/** Minimum useful probe budget; below this the probe would be cut off anyway. */
-const MIN_PROBE_BUDGET_MS = 500;
+/**
+ * Minimum useful probe budget.
+ *
+ * A fast shard answers in 0.8-2.0 s, so a probe with less time than this would
+ * time out a healthy id and throw it away. Below it, stop probing and fall back
+ * to pi's session id instead.
+ */
+const MIN_PROBE_BUDGET_MS = 1_500;
 
 export interface PoolManagerDeps {
   config: PoolConfig;
@@ -250,7 +256,10 @@ export class PoolManager {
       const remaining = deadline - this.now();
       if (remaining < MIN_PROBE_BUDGET_MS) break;
       await this.waitForProbeSlot(deadline);
-      if (this.now() >= deadline) break;
+      const now = this.now();
+      // Still inside a 429 backoff window (the deadline did not allow sleeping
+      // it off) — probing now would ignore the gateway's Retry-After.
+      if (now < this.blockedUntil || now >= deadline) break;
 
       const id = this.randomId();
       const result = await this.prober.probe(id, target, deadline - this.now());

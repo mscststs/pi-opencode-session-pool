@@ -90,6 +90,7 @@ async function harness(
     randomId: () => `cand-${++counter}`,
     sleep: async (ms) => {
       sleeps.push(ms);
+      clock.value += ms;
     },
   });
 
@@ -137,13 +138,13 @@ test("probes candidates until one is fast", async () => {
 test("returns undefined and keeps pi's id when the budget is too small", async () => {
   const { manager, calls } = await harness();
   assert.equal(await manager.bind(key("s1"), target, 0), undefined);
-  assert.equal(await manager.bind(key("s1"), target, 499), undefined);
+  assert.equal(await manager.bind(key("s1"), target, 1_499), undefined);
   assert.deepEqual(calls, []);
   assert.equal(manager.peek(key("s1")), undefined);
 });
 
 test("gives up when the budget runs out without a fast candidate", async () => {
-  const { manager, calls } = await harness({ advanceOnCall: 900 });
+  const { manager, calls } = await harness({ advanceOnCall: 400 });
   assert.equal(await manager.bind(key("s1"), target, 2_000), undefined);
   assert.ok(calls.length >= 2, `expected several probes, got ${calls.length}`);
 });
@@ -326,6 +327,15 @@ test("honours 429 retry-after before the next probe", async () => {
   assert.equal(await manager.bind(key("s1"), target, 10_000), "cand-2");
   assert.deepEqual(calls, ["cand-1", "cand-2"]);
   assert.deepEqual(sleeps, [5_000]);
+});
+
+test("never probes during a 429 backoff that outlives the budget", async () => {
+  const { manager, calls } = await harness({
+    plan: [{ reason: "overloaded", status: 429, retryAfterMs: 9_000 }, { fast: true }],
+  });
+
+  assert.equal(await manager.bind(key("s1"), target, 5_000), undefined);
+  assert.deepEqual(calls, ["cand-1"], "no probing after Retry-After exceeds the budget");
 });
 
 test("stops probing when the gateway rejects the credentials", async () => {
