@@ -50,15 +50,28 @@ server-timing: gateway;dur=10, upstream;dur=1447, total;dur=1498
 | 后台 | 定时器 | 重新验证过期条目、把池子补满到 `PI_OCPOOL_SIZE` |
 | 退出 | `session_shutdown` | `quit` 时停掉定时器（reload 保留进程级热池） |
 
+池子只有三个动作——**探测 / 取走 / 补充**——不做复用：
+
+| 动作 | 触发 | 效果 |
+| --- | --- | --- |
+| 探测 | 池子空，或 spare 已过期 | 发 1-token 请求；快则进入池子成为 spare |
+| 取走 | 新对话开始 | spare 离开池子，永久归这个会话所有 |
+| 补充 | 取走后、以及每 `PI_OCPOOL_REFRESH_INTERVAL_MS` | 把 spare 补回 `PI_OCPOOL_SIZE` |
+
 获取顺序：
 
-1. **粘滞绑定** —— `piSessionId :: provider :: model` 已有可用 id：零探测；`--continue`
-   恢复会话也能保住 prompt cache。
-2. **池中 id** —— 同 provider+model 下新鲜且未被占用的条目：零探测；该 id 会被
-   “租”给这个会话，两个并发会话不会共用同一条上游分片。
-3. **探测** —— 依次生成 id、各发一个 1-token 请求，直到命中快的，受调用预算限制。
+1. **恢复会话** —— `piSessionId :: provider :: model` 已经拥有一个 id：零探测，
+   prompt cache 保持热。
+2. **取走新鲜 spare** —— `PI_OCPOOL_TTL_MS` 内验证过的 id：零探测，并从池子移除。
+3. **复验过期 spare** —— 只有过期 spare 时，先探测这个**原 id** 再用（比重新抽签便宜）；
+   仍然快就取走，慢了就丢掉。
+4. **探测** —— 依次生成 id、各发一个 1-token 请求，直到命中快的，受调用预算限制。
    候选约 50% 是快的，通常 1–2 次、耗时 1–3 秒，每个会话仅一次。
-4. **放弃** —— 预算内没找到快 id：不改请求头，行为与没装扩展完全一致。
+5. **放弃** —— 预算内没找到快 id：不改请求头，行为与没装扩展完全一致。
+
+**一个 id 永远不会交给第二个会话。** 会话结束（空闲超过 `PI_OCPOOL_LEASE_TTL_MS`）
+或被判定退化时，该 id 直接退役；想回到池子只能重新探测。这样保证「一个会话一个路由 id」，
+两个会话不可能共用同一条上游分片或缓存槽。
 
 所有失败路径都安全降级：缺凭证、状态文件损坏、网络错误、429 限流、20 秒卡顿，都会
 回落到 pi 自己的 id，绝不向请求链路抛错。状态文件写失败也不影响内存中的路由。
@@ -82,13 +95,14 @@ pi install git:github.com/<you>/pi-opencode-session-pool@v0.1.0
 | 变量 | 默认值 | 含义 |
 | --- | --- | --- |
 | `PI_OCPOOL` | `1` | 总开关，`0` 完全关闭 |
-| `PI_OCPOOL_SIZE` | `3` | 每个 provider+model 保留的快 id 数（1–16） |
+| `PI_OCPOOL_SIZE` | `3` | 每个 provider+model 保留的**空闲**快 id 数（1–16） |
 | `PI_OCPOOL_TTL_MS` | `1800000` | 超过该时长的条目重新验证 |
 | `PI_OCPOOL_MAX_UPSTREAM_MS` | `2500` | 探测时判定“快”的 upstream 上限 |
 | `PI_OCPOOL_PROBE_TIMEOUT_MS` | `10000` | 单个探测的超时；慢 id 远不止这么久 |
 | `PI_OCPOOL_STARTUP_BUDGET_MS` | `6000` | `session_start` 最多阻塞多久；`0` 表示不阻塞 |
 | `PI_OCPOOL_REQUEST_BUDGET_MS` | `4000` | 首个请求最多阻塞多久 |
 | `PI_OCPOOL_REFRESH_INTERVAL_MS` | `300000` | 后台刷新间隔，`0` 关闭定时器 |
+| `PI_OCPOOL_REFILL_DELAY_MS` | `15000` | 取走 spare 后多久补充；`0` 关闭即时补充 |
 | `PI_OCPOOL_MIN_PROBE_INTERVAL_MS` | `750` | 两次探测的最小间隔 |
 | `PI_OCPOOL_LEASE_TTL_MS` | `28800000` | 绑定空闲多久后释放占用的 id |
 | `PI_OCPOOL_QUARANTINE_FAILURES` | `2` | 真实请求连续几次“变慢”后隔离 |
@@ -130,7 +144,7 @@ npm run pool:live -- --seed   # 探测并把快 id 写入池子
 
 ```bash
 npm install
-npm run check        # 类型检查 + 56 个单测
+npm run check        # 类型检查 + 60 个单测
 npm run pool:live    # 可选：真实网关冒烟测试
 ```
 

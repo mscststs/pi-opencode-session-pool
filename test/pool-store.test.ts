@@ -22,7 +22,6 @@ const entry = (id: string, overrides: Record<string, unknown> = {}) => ({
   upstreamMs: 900,
   verifiedAt: 1_000_000,
   createdAt: 1_000_000,
-  failures: 0,
   ...overrides,
 });
 
@@ -63,7 +62,7 @@ test("normalizeState drops malformed entries and bindings", () => {
     ],
     bindings: {
       good: { routedId: "gw-1", provider: "p", model: "m", boundAt: 5 },
-      bad: { routedId: "", provider: "p", model: "m", boundAt: 5 },
+      bad: { routedId: "", provider: "p", model: "m", boundAt: 5, lastSeenAt: 5 },
     },
   });
 
@@ -83,6 +82,9 @@ test("pruneState expires idle bindings and caps the table", () => {
         model: "m",
         boundAt: index,
         lastSeenAt: index,
+        upstreamMs: 900,
+        verifiedAt: index,
+        failures: 0,
       },
     ]),
   );
@@ -133,7 +135,16 @@ test("concurrent mutations in one process are serialized", async () => {
       state.entries.push(entry("gw-b"));
     }),
     store.mutate((state) => {
-      state.bindings.k = { routedId: "gw-a", provider: "p", model: "m", boundAt: 1, lastSeenAt: 1 };
+      state.bindings.k = {
+        routedId: "gw-a",
+        provider: "p",
+        model: "m",
+        boundAt: 1,
+        lastSeenAt: 1,
+        upstreamMs: 900,
+        verifiedAt: 1,
+        failures: 0,
+      };
     }),
   ]);
 

@@ -55,18 +55,35 @@ returns `chatcmpl-…`. Both signals are used to classify a probe.
 | Background | interval timer | Re-verify stale ids and top the pool up to `PI_OCPOOL_SIZE`. |
 | Shutdown | `session_shutdown` | Stop the timer on `quit` (reloads keep the warm process-level pool). |
 
+The pool has exactly three operations — **probe**, **take**, **refill** — and no
+recycling:
+
+| Operation | When | Effect |
+| --- | --- | --- |
+| probe | pool is empty, or a spare is stale | 1-token request; if fast, the id becomes a spare |
+| take | a conversation starts | the spare leaves the pool and belongs to that conversation for good |
+| refill | after a take, and every `PI_OCPOOL_REFRESH_INTERVAL_MS` | grows the spare set back to `PI_OCPOOL_SIZE` |
+
 Acquisition, in order:
 
-1. **Sticky binding** — `piSessionId :: provider :: model` already maps to a
-   usable id. Zero probes; a resumed conversation also keeps its prompt cache.
-2. **Pooled id** — a fresh, unleased entry for the same provider+model. Zero
-   probes; the id is leased to this conversation so two live sessions never
-   share one routed shard.
-3. **Probe** — sequentially generate ids and send one 1-token request each until
+1. **Resumed conversation** — `piSessionId :: provider :: model` already owns an
+   id. Zero probes, and the prompt cache stays warm.
+2. **Take a fresh spare** — an id verified within `PI_OCPOOL_TTL_MS`. Zero
+   probes. It is removed from the pool.
+3. **Verify a stale spare** — if only stale spares exist, that exact id is
+   probed before use (cheaper than discovering a new one); if it is still fast
+   it is taken, if not it is discarded.
+4. **Probe** — sequentially generate ids and send one 1-token request each until
    one is fast, within the caller's time budget. Roughly 50% of candidates are
    fast, so this usually costs 1-2 requests and ~1-3 s, once per conversation.
-4. **Give up** — no fast id within the budget: the header is left untouched and
+5. **Give up** — no fast id within the budget: the header is left untouched and
    behaviour is exactly as before the extension existed.
+
+An id is **never handed to a second conversation**. When a conversation is gone
+(idle for `PI_OCPOOL_LEASE_TTL_MS`, or its routed upstream degraded), the id is
+retired; the only way back into the pool is a fresh probe. That keeps the
+invariant "one conversation, one routed id" — two sessions can never share an
+upstream shard or a prompt-cache slot.
 
 Everything degrades safely: missing credentials, a corrupt state file, a
 network error, a rate limit or a 20 s stall all fall back to pi's own id and
@@ -93,13 +110,14 @@ All settings are environment variables (same convention as the sibling
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PI_OCPOOL` | `1` | Master switch. `0` disables the extension entirely. |
-| `PI_OCPOOL_SIZE` | `3` | Verified-fast ids kept per provider+model (`1`-`16`). |
+| `PI_OCPOOL_SIZE` | `3` | Verified-fast **spare** ids kept per provider+model (`1`-`16`). |
 | `PI_OCPOOL_TTL_MS` | `1800000` | Re-verify pooled ids older than this. |
 | `PI_OCPOOL_MAX_UPSTREAM_MS` | `2500` | Probe ceiling that still counts as "fast". |
 | `PI_OCPOOL_PROBE_TIMEOUT_MS` | `10000` | Abort one probe after this; slow ids take much longer. |
 | `PI_OCPOOL_STARTUP_BUDGET_MS` | `6000` | Max time `session_start` may spend binding. `0` = never block. |
 | `PI_OCPOOL_REQUEST_BUDGET_MS` | `4000` | Max time the first request may spend binding. |
 | `PI_OCPOOL_REFRESH_INTERVAL_MS` | `300000` | Background refresh cadence. `0` disables the timer. |
+| `PI_OCPOOL_REFILL_DELAY_MS` | `15000` | Delay before refilling after a spare is taken; `0` disables eager refill. |
 | `PI_OCPOOL_MIN_PROBE_INTERVAL_MS` | `750` | Minimum spacing between probes. |
 | `PI_OCPOOL_LEASE_TTL_MS` | `28800000` | Idle time after which a binding releases its id. |
 | `PI_OCPOOL_QUARANTINE_FAILURES` | `2` | Degraded real requests before an id is evicted. |
@@ -149,7 +167,7 @@ npm run pool:live -- --seed   # probe and append the fast ids to the pool
 
 ```bash
 npm install
-npm run check        # typecheck + 56 unit tests
+npm run check        # typecheck + 60 unit tests
 npm run pool:live    # optional: real gateway smoke test
 ```
 

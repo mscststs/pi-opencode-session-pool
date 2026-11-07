@@ -33,6 +33,14 @@ export const DEFAULT_REQUEST_BUDGET_MS = 4_000;
 /** Background refresh cadence. */
 export const DEFAULT_REFRESH_INTERVAL_MS = 5 * 60_000;
 
+/**
+ * Delay before refilling the pool after a spare was taken.
+ *
+ * Long enough not to compete with the starting conversation's first request,
+ * short enough that the next conversation usually finds a spare.
+ */
+export const DEFAULT_REFILL_DELAY_MS = 15_000;
+
 /** Minimum gap between two probe requests, to stay well clear of rate limits. */
 export const DEFAULT_MIN_PROBE_INTERVAL_MS = 750;
 
@@ -80,6 +88,8 @@ export interface PoolConfig {
   requestBudgetMs: number;
   /** Background refresh interval (`0` disables the timer). */
   refreshIntervalMs: number;
+  /** Delay before topping the pool up after a take (`0` disables eager refill). */
+  refillDelayMs: number;
   /** Minimum spacing between probe requests. */
   minProbeIntervalMs: number;
   /** Idle time after which a binding stops reserving its routed id. */
@@ -129,6 +139,7 @@ function isFalsy(value: string | undefined): boolean {
  * | `PI_OCPOOL_STARTUP_BUDGET_MS`     | `6000`                      | Pool-fill budget on session start.          |
  * | `PI_OCPOOL_REQUEST_BUDGET_MS`     | `4000`                      | Pool-fill budget on first request.          |
  * | `PI_OCPOOL_REFRESH_INTERVAL_MS`   | `300000`                    | Background refresh cadence; `0` disables.   |
+ * | `PI_OCPOOL_REFILL_DELAY_MS`        | `15000`                     | Refill delay after taking a spare.          |
  * | `PI_OCPOOL_MIN_PROBE_INTERVAL_MS` | `750`                       | Minimum spacing between probes.             |
  * | `PI_OCPOOL_LEASE_TTL_MS`          | `28800000`                  | Idle time before a binding releases its id. |
  * | `PI_OCPOOL_QUARANTINE_FAILURES`   | `2`                         | Slow hits before an id is evicted.          |
@@ -160,6 +171,10 @@ export function readConfig(env: Env = process.env, home: string = homedir()): Po
     refreshIntervalMs: Math.max(
       0,
       parseInteger(env.PI_OCPOOL_REFRESH_INTERVAL_MS, DEFAULT_REFRESH_INTERVAL_MS),
+    ),
+    refillDelayMs: Math.max(
+      0,
+      parseInteger(env.PI_OCPOOL_REFILL_DELAY_MS, DEFAULT_REFILL_DELAY_MS),
     ),
     minProbeIntervalMs: Math.max(
       0,

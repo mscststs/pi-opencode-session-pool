@@ -104,6 +104,9 @@ test("a resumed conversation keeps its existing routed id", async () => {
         model: opencodeModel.id,
         boundAt: Date.now() - 5_000,
         lastSeenAt: Date.now() - 5_000,
+        upstreamMs: 880,
+        verifiedAt: Date.now() - 5_000,
+        failures: 0,
       },
     },
   };

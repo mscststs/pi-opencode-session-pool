@@ -45,18 +45,17 @@ const entries = [...(state.entries ?? [])].sort(
 );
 
 console.log(`state: ${statePath}`);
-console.log(`entries: ${entries.length}   bindings: ${Object.keys(state.bindings ?? {}).length}\n`);
+console.log(`spares: ${entries.length}   conversations holding an id: ${Object.keys(state.bindings ?? {}).length}\n`);
 
 if (entries.length === 0) {
-  console.log("(empty — the next pi session will probe fresh candidates)");
+  console.log("(no spares — the next pi session will probe a fresh candidate, then refill)");
 } else {
-  const header = ["id", "provider/model", "upstream", "verified", "fail"];
+  const header = ["id", "provider/model", "upstream", "verified"];
   const rows = entries.map((entry) => [
     entry.id,
     `${entry.provider}/${entry.model}`,
     `${Math.round(entry.upstreamMs)}ms`,
     age(now - entry.verifiedAt),
-    String(entry.failures ?? 0),
   ]);
   const widths = header.map((_, index) =>
     Math.max(header[index].length, ...rows.map((row) => row[index].length)),
@@ -69,7 +68,7 @@ if (entries.length === 0) {
 
 const bindings = Object.entries(state.bindings ?? {});
 if (bindings.length > 0) {
-  console.log(`\nbindings (pi session :: provider :: model -> id):`);
+  console.log(`\nconversations (pi session :: provider :: model -> owned id, never reused):`);
   for (const [key, binding] of bindings.sort((a, b) => b[1].lastSeenAt - a[1].lastSeenAt)) {
     const [session, provider, model] = key.split("::");
     console.log(

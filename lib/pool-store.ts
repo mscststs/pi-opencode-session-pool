@@ -75,7 +75,6 @@ export function normalizeEntry(value: unknown): PoolEntry | undefined {
     upstreamMs: Math.max(0, upstreamMs),
     verifiedAt,
     createdAt: createdAt ?? verifiedAt,
-    failures: Math.max(0, finiteNumber(value.failures) ?? 0),
   };
 }
 
@@ -93,6 +92,9 @@ export function normalizeBinding(value: unknown): Binding | undefined {
     model,
     boundAt,
     lastSeenAt: finiteNumber(value.lastSeenAt) ?? boundAt,
+    upstreamMs: Math.max(0, finiteNumber(value.upstreamMs) ?? 0),
+    verifiedAt: finiteNumber(value.verifiedAt) ?? boundAt,
+    failures: Math.max(0, finiteNumber(value.failures) ?? 0),
   };
 }
 
@@ -121,7 +123,14 @@ export interface PruneOptions {
   now?: number;
 }
 
-/** Drop expired bindings and cap the binding table. Entries are kept for the manager to re-verify. */
+/**
+ * Drop expired bindings and cap the binding table.
+ *
+ * Expired bindings are simply removed: their routed id is retired and never
+ * returns to the pool, so a later conversation can only receive a freshly
+ * verified id. Spare entries are managed by the pool manager, which re-verifies
+ * them instead of dropping them by age.
+ */
 export function pruneState(state: PoolState, options: PruneOptions): PoolState {
   const now = options.now ?? Date.now();
   const cutoff = now - options.leaseTtlMs;

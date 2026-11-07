@@ -8,7 +8,7 @@ import { PoolManager } from "../lib/pool-manager.ts";
 import { PoolStore } from "../lib/pool-store.ts";
 import type { Prober } from "../lib/probe.ts";
 import { bindingKey } from "../lib/targets.ts";
-import type { PoolEntry, PoolState, ProbeReason, ProbeResult, ProbeTarget } from "../lib/types.ts";
+import type { Binding, PoolEntry, PoolState, ProbeReason, ProbeResult, ProbeTarget } from "../lib/types.ts";
 
 const target: ProbeTarget = {
   provider: "opencode-go",
@@ -17,6 +17,7 @@ const target: ProbeTarget = {
   apiKey: "sk-test",
 };
 
+const NOW = 1_000_000;
 const key = (session: string) => bindingKey(session, target.provider, target.model);
 
 function makeConfig(overrides: Partial<PoolConfig> = {}): PoolConfig {
@@ -24,6 +25,7 @@ function makeConfig(overrides: Partial<PoolConfig> = {}): PoolConfig {
     ...readConfig({}, "/home/tester"),
     minProbeIntervalMs: 0,
     refreshIntervalMs: 0,
+    refillDelayMs: 0,
     ...overrides,
   };
 }
@@ -43,6 +45,7 @@ interface Harness {
   calls: string[];
   clock: { value: number };
   sleeps: number[];
+  timers: Array<{ delayMs: number; run: () => void }>;
 }
 
 async function harness(
@@ -55,7 +58,7 @@ async function harness(
   } = {},
 ): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "pi-ocpool-manager-"));
-  const clock = { value: 1_000_000 };
+  const clock = { value: NOW };
   const now = () => clock.value;
   const store = new PoolStore({ path: join(dir, "state.json"), now });
   if (options.state) await store.save(options.state);
@@ -82,6 +85,7 @@ async function harness(
 
   let counter = 0;
   const sleeps: number[] = [];
+  const timers: Harness["timers"] = [];
   const manager = new PoolManager({
     config: makeConfig(options.config),
     store,
@@ -92,34 +96,89 @@ async function harness(
       sleeps.push(ms);
       clock.value += ms;
     },
+    setTimeoutImpl: ((fn: () => void, delayMs?: number) => {
+      timers.push({ delayMs: Number(delayMs ?? 0), run: fn });
+      return { unref() {} } as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+    clearTimeoutImpl: (() => {}) as typeof clearTimeout,
   });
 
-  return { manager, store, calls, clock, sleeps };
+  return { manager, store, calls, clock, sleeps, timers };
 }
 
-function entry(id: string, overrides: Partial<PoolEntry> = {}): PoolEntry {
-  return {
-    id,
-    provider: target.provider,
-    model: target.model,
-    upstreamMs: 900,
-    verifiedAt: 1_000_000,
-    createdAt: 1_000_000,
-    failures: 0,
-    ...overrides,
-  };
+const spare = (id: string, overrides: Partial<PoolEntry> = {}): PoolEntry => ({
+  id,
+  provider: target.provider,
+  model: target.model,
+  upstreamMs: 900,
+  verifiedAt: NOW,
+  createdAt: NOW,
+  ...overrides,
+});
+
+const owned = (id: string, overrides: Partial<Binding> = {}): Binding => ({
+  routedId: id,
+  provider: target.provider,
+  model: target.model,
+  boundAt: NOW,
+  lastSeenAt: NOW,
+  upstreamMs: 900,
+  verifiedAt: NOW,
+  failures: 0,
+  ...overrides,
+});
+
+function stateWith(spares: PoolEntry[], bindings: PoolState["bindings"] = {}): PoolState {
+  return { version: 1, entries: spares, bindings };
 }
 
-function stateWith(entries: PoolEntry[], bindings: PoolState["bindings"] = {}): PoolState {
-  return { version: 1, entries, bindings };
-}
+test("takes a fresh spare without probing, and it leaves the pool", async () => {
+  const { manager, store } = await harness({ state: stateWith([spare("spare-1")]) });
 
-test("adopts a fresh pooled id without probing", async () => {
-  const { manager, calls } = await harness({ state: stateWith([entry("good-1")]) });
+  assert.equal(await manager.bind(key("s1"), target, 0), "spare-1");
+  assert.equal(manager.peek(key("s1")), "spare-1");
 
-  assert.equal(await manager.bind(key("s1"), target, 0), "good-1");
+  const persisted = await store.load();
+  assert.deepEqual(persisted.entries, [], "the spare is consumed");
+  assert.equal(persisted.bindings[key("s1")]?.routedId, "spare-1");
+});
+
+test("a resumed conversation keeps its own id", async () => {
+  const { manager, calls } = await harness({
+    state: stateWith([], {
+      [key("s1")]: owned("own-1", { lastSeenAt: NOW - 5 * 60_000 }),
+    }),
+  });
+
+  assert.equal(await manager.bind(key("s1"), target, 0), "own-1");
   assert.deepEqual(calls, []);
-  assert.equal(manager.peek(key("s1")), "good-1");
+});
+
+test("two conversations never share an id", async () => {
+  const { manager, calls } = await harness({
+    plan: [{ fast: true }],
+    state: stateWith([spare("spare-1"), spare("spare-2", { upstreamMs: 1_200 })]),
+  });
+
+  assert.equal(await manager.bind(key("s1"), target, 0), "spare-1");
+  assert.equal(await manager.bind(key("s2"), target, 0), "spare-2");
+  assert.deepEqual(calls, []);
+
+  // Pool is empty now: a third conversation probes a new id.
+  assert.equal(await manager.bind(key("s3"), target, 5_000), "cand-1");
+  assert.deepEqual(calls, ["cand-1"]);
+});
+
+test("an id whose conversation is gone is retired, never reused", async () => {
+  const { manager, calls } = await harness({
+    plan: [{ fast: true }],
+    state: stateWith([], {
+      [key("old")]: owned("old-1", { lastSeenAt: NOW - 9 * 60 * 60_000 }),
+    }),
+  });
+
+  assert.equal(await manager.bind(key("new"), target, 5_000), "cand-1");
+  assert.deepEqual(calls, ["cand-1"], "the retired id is not offered to a new conversation");
 });
 
 test("probes candidates until one is fast", async () => {
@@ -131,8 +190,8 @@ test("probes candidates until one is fast", async () => {
   assert.deepEqual(calls, ["cand-1", "cand-2"]);
 
   const persisted = await store.load();
-  assert.deepEqual(persisted.entries.map((item) => item.id), ["cand-2"]);
-  assert.equal(persisted.entries[0]?.upstreamMs, 870);
+  assert.deepEqual(persisted.entries, [], "a probed id goes straight to its conversation");
+  assert.equal(persisted.bindings[key("s1")]?.upstreamMs, 870);
 });
 
 test("returns undefined and keeps pi's id when the budget is too small", async () => {
@@ -149,111 +208,64 @@ test("gives up when the budget runs out without a fast candidate", async () => {
   assert.ok(calls.length >= 2, `expected several probes, got ${calls.length}`);
 });
 
-test("a bound conversation is sticky and never re-probes", async () => {
-  const { manager, calls } = await harness({ plan: [{ fast: true }] });
-  const first = await manager.bind(key("s1"), target, 5_000);
-  const second = await manager.bind(key("s1"), target, 5_000);
-
-  assert.equal(first, "cand-1");
-  assert.equal(second, "cand-1");
-  assert.deepEqual(calls, ["cand-1"]);
-});
-
-test("two live conversations never share one id", async () => {
+test("a stale spare is re-verified and taken", async () => {
   const { manager, calls } = await harness({
-    state: stateWith([entry("good-1"), entry("good-2", { upstreamMs: 1_200 })]),
-    plan: [{ fast: true }],
+    plan: [{ fast: true, upstreamMs: 800 }],
+    state: stateWith([spare("spare-1", { verifiedAt: NOW - 60 * 60_000 })]),
+    config: { ttlMs: 30 * 60_000 },
   });
 
-  assert.equal(await manager.bind(key("s1"), target, 0), "good-1");
-  assert.equal(await manager.bind(key("s2"), target, 0), "good-2");
-  assert.deepEqual(calls, []);
-
-  // Both pooled ids are leased now, so a third conversation has to probe.
-  assert.equal(await manager.bind(key("s3"), target, 5_000), "cand-1");
-  assert.deepEqual(calls, ["cand-1"]);
+  assert.equal(await manager.bind(key("s1"), target, 5_000), "spare-1");
+  assert.deepEqual(calls, ["spare-1"], "the known id is verified instead of a random one");
 });
 
-test("an expired lease frees its id again", async () => {
-  const { manager } = await harness({
-    state: stateWith(
-      [entry("good-1")],
-      {
-        [key("old")]: {
-          routedId: "good-1",
-          provider: target.provider,
-          model: target.model,
-          boundAt: 0,
-          lastSeenAt: 0,
-        },
-      },
-    ),
-    config: { leaseTtlMs: 60_000 },
+test("a stale spare that turned slow is dropped and replaced", async () => {
+  const { manager, calls, store } = await harness({
+    plan: [{ fast: false, reason: "slow" }, { fast: true }],
+    state: stateWith([spare("spare-1", { verifiedAt: NOW - 60 * 60_000 })]),
+    config: { ttlMs: 30 * 60_000 },
   });
 
-  assert.equal(await manager.bind(key("new"), target, 0), "good-1");
+  assert.equal(await manager.bind(key("s1"), target, 10_000), "cand-1");
+  assert.deepEqual(calls, ["spare-1", "cand-1"]);
+
+  const persisted = await store.load();
+  assert.deepEqual(persisted.entries, [], "the slow spare is gone");
 });
 
-test("a slow observation quarantines the id and unbinds the conversation", async () => {
-  const { manager, store } = await harness({ state: stateWith([entry("good-1")]) });
-  await manager.bind(key("s1"), target, 0);
+test("a slow observation retires the conversation's id", async () => {
+  const { manager, store } = await harness({ state: stateWith([], { [key("s1")]: owned("own-1") }) });
 
   await manager.observe(key("s1"), { "server-timing": "gateway;dur=10, upstream;dur=20000" }, 200);
 
   assert.equal(manager.peek(key("s1")), undefined);
   const persisted = await store.load();
-  assert.deepEqual(persisted.entries, []);
   assert.deepEqual(Object.keys(persisted.bindings), []);
+  assert.deepEqual(persisted.entries, [], "a retired id never returns to the pool");
 });
 
-test("a fast observation refreshes the entry stats", async () => {
+test("a fast observation refreshes stats and the lease", async () => {
   const { manager, store, clock } = await harness({
-    state: stateWith([entry("good-1", { upstreamMs: 2_000, verifiedAt: 1 })]),
+    state: stateWith([], { [key("s1")]: owned("own-1", { upstreamMs: 2_000, lastSeenAt: NOW - 60_000 }) }),
   });
-  await manager.bind(key("s1"), target, 0);
 
-  // Move past the persist throttle so the refreshed stats reach the file.
   clock.value += 10_000;
   await manager.observe(key("s1"), { "server-timing": "upstream;dur=910" }, 200);
 
   const persisted = await store.load();
-  assert.equal(persisted.entries[0]?.upstreamMs, 910);
-  assert.equal(persisted.entries[0]?.failures, 0);
-});
-
-test("real traffic refreshes the binding lease", async () => {
-  const { manager, store, clock } = await harness({
-    state: stateWith(
-      [entry("good-1")],
-      {
-        [key("s1")]: {
-          routedId: "good-1",
-          provider: target.provider,
-          model: target.model,
-          boundAt: 0,
-          lastSeenAt: 0,
-        },
-      },
-    ),
-  });
-  await manager.bind(key("s1"), target, 0);
-
-  clock.value += 60 * 60_000;
-  await manager.observe(key("s1"), { "server-timing": "upstream;dur=1200" }, 200);
-
-  const persisted = await store.load();
+  assert.equal(persisted.bindings[key("s1")]?.upstreamMs, 910);
+  assert.equal(persisted.bindings[key("s1")]?.failures, 0);
   assert.equal(persisted.bindings[key("s1")]?.lastSeenAt, clock.value);
 });
 
-test("one degraded observation is tolerated, the second evicts", async () => {
+test("one degraded observation is tolerated, the second retires", async () => {
   const { manager } = await harness({
-    state: stateWith([entry("good-1")]),
+    state: stateWith([], { [key("s1")]: owned("own-1") }),
     config: { quarantineFailures: 2, degradeMs: 6_000, quarantineMs: 20_000 },
   });
-  await manager.bind(key("s1"), target, 0);
 
   await manager.observe(key("s1"), { "server-timing": "upstream;dur=7000" }, 200);
-  assert.equal(manager.peek(key("s1")), "good-1", "7000ms is a strike but not catastrophic");
+  assert.equal(manager.peek(key("s1")), "own-1", "7000ms is a strike but not catastrophic");
 
   await manager.observe(key("s1"), { "server-timing": "upstream;dur=7100" }, 200);
   assert.equal(manager.peek(key("s1")), undefined);
@@ -261,59 +273,84 @@ test("one degraded observation is tolerated, the second evicts", async () => {
 
 test("ordinary prefill latency is not a strike", async () => {
   const { manager } = await harness({
-    state: stateWith([entry("good-1")]),
+    state: stateWith([], { [key("s1")]: owned("own-1") }),
     config: { degradeMs: 6_000, quarantineMs: 8_000, quarantineFailures: 2 },
   });
-  await manager.bind(key("s1"), target, 0);
 
   for (const upstream of [2600, 3400, 5100]) {
     await manager.observe(key("s1"), { "server-timing": `upstream;dur=${upstream}` }, 200);
-    assert.equal(manager.peek(key("s1")), "good-1", `${upstream}ms is normal prefill`);
+    assert.equal(manager.peek(key("s1")), "own-1", `${upstream}ms is normal prefill`);
   }
 
   await manager.observe(key("s1"), { "server-timing": "upstream;dur=9000" }, 200);
   assert.equal(manager.peek(key("s1")), undefined, "9000ms is catastrophic");
 });
 
-test("an overloaded (429) response evicts immediately", async () => {
-  const { manager } = await harness({ state: stateWith([entry("good-1")]) });
-  await manager.bind(key("s1"), target, 0);
+test("an overloaded (429) response retires immediately", async () => {
+  const { manager } = await harness({ state: stateWith([], { [key("s1")]: owned("own-1") }) });
 
   await manager.observe(key("s1"), { "retry-after-ms": "2303" }, 429);
   assert.equal(manager.peek(key("s1")), undefined);
 });
 
-test("a stale binding inside the lease window is reused without a probe", async () => {
-  const stale = entry("good-1", { verifiedAt: 1_000_000 - 60 * 60_000 });
-  const { manager, calls } = await harness({
-    state: stateWith([stale], {
-      [key("s1")]: {
-        routedId: "good-1",
-        provider: target.provider,
-        model: target.model,
-        boundAt: 1_000_000,
-        lastSeenAt: 1_000_000,
-      },
-    }),
-    config: { ttlMs: 30 * 60_000 },
+test("taking a spare schedules a refill", async () => {
+  const { manager, timers } = await harness({
+    state: stateWith([spare("spare-1")]),
+    config: { refillDelayMs: 15_000 },
   });
 
-  assert.equal(await manager.bind(key("s1"), target, 5_000), "good-1");
-  assert.deepEqual(calls, []);
+  await manager.bind(key("s1"), target, 0);
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0]?.delayMs, 15_000);
 });
 
-test("a stale entry is not handed to a new conversation", async () => {
-  const stale = entry("good-1", { verifiedAt: 1_000_000 - 60 * 60_000 });
-  const { manager, calls } = await harness({
-    state: stateWith([stale]),
-    config: { ttlMs: 30 * 60_000 },
+test("refresh retires expired conversations", async () => {
+  const { manager, store } = await harness({
+    state: stateWith([], { [key("dead")]: owned("old-1", { lastSeenAt: NOW - 9 * 60 * 60_000 }) }),
+    config: { leaseTtlMs: 8 * 60 * 60_000 },
   });
+  manager.registerTarget(target);
 
-  assert.equal(await manager.bind(key("s2"), target, 0), undefined);
-  assert.deepEqual(calls, []);
+  await manager.refresh();
+
+  const persisted = await store.load();
+  assert.deepEqual(Object.keys(persisted.bindings), []);
 });
 
-test("refresh tops the pool up to its configured size", async () => {
+test("refresh re-verifies stale spares and drops slow ones", async () => {
+  const { manager, store, calls } = await harness({
+    plan: [{ fast: false, reason: "slow" }],
+    state: stateWith([spare("spare-1", { verifiedAt: NOW - 60 * 60_000 })]),
+    config: { size: 1, ttlMs: 30 * 60_000 },
+  });
+  manager.registerTarget(target);
+
+  await manager.refresh();
+
+  assert.equal(calls[0], "spare-1", "spares are re-verified by id");
+  const persisted = await store.load();
+  assert.deepEqual(persisted.entries, []);
+});
+
+test("refresh never re-probes an id owned by a conversation", async () => {
+  const { manager, store, calls } = await harness({
+    plan: [{ fast: false, reason: "slow" }],
+    state: stateWith(
+      [spare("spare-1", { verifiedAt: NOW - 60 * 60_000 })],
+      { [key("s1")]: owned("own-1", { lastSeenAt: NOW - 60 * 60_000 }) },
+    ),
+    config: { size: 1, ttlMs: 30 * 60_000, leaseTtlMs: 8 * 60 * 60_000 },
+  });
+  manager.registerTarget(target);
+
+  await manager.refresh();
+
+  assert.ok(!calls.includes("own-1"), `owned ids are not probed (calls: ${calls.join(",")})`);
+  const persisted = await store.load();
+  assert.equal(persisted.bindings[key("s1")]?.routedId, "own-1");
+});
+
+test("refresh tops the spare pool up to its configured size", async () => {
   const { manager, store, calls } = await harness({
     plan: [{ fast: true }, { fast: true }, { fast: true }],
     config: { size: 3 },
@@ -325,22 +362,7 @@ test("refresh tops the pool up to its configured size", async () => {
   assert.deepEqual(calls, ["cand-1", "cand-2", "cand-3"]);
   const persisted = await store.load();
   assert.equal(persisted.entries.length, 3);
-});
-
-test("refresh re-verifies stale entries and drops the slow ones", async () => {
-  const stale = entry("good-1", { verifiedAt: 1_000_000 - 60 * 60_000 });
-  const { manager, store, calls } = await harness({
-    state: stateWith([stale]),
-    plan: [{ fast: false, reason: "slow" }],
-    config: { size: 1, ttlMs: 30 * 60_000 },
-  });
-  manager.registerTarget(target);
-
-  await manager.refresh();
-
-  assert.equal(calls[0], "good-1", "the pooled id is re-verified, not replaced blindly");
-  const persisted = await store.load();
-  assert.equal(persisted.entries.length, 0);
+  assert.deepEqual(Object.keys(persisted.bindings), []);
 });
 
 test("honours 429 retry-after before the next probe", async () => {
@@ -396,7 +418,6 @@ test("concurrent binds share a single acquisition", async () => {
 
 test("bind never rejects even when storage explodes", async () => {
   const { manager } = await harness({ plan: [{ fast: true }] });
-  // Sabotage the store mid-flight.
   (manager as unknown as { store: { load: () => Promise<never> } }).store.load = async () => {
     throw new Error("disk on fire");
   };

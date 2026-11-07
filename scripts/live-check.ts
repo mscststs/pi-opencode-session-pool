@@ -99,7 +99,6 @@ if (seed && fast.length > 0) {
       upstreamMs,
       verifiedAt: now,
       createdAt: now,
-      failures: 0,
     });
   }
   await mkdir(dirname(poolPath), { recursive: true });

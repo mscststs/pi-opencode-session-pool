@@ -25,7 +25,7 @@ export interface ProbeTarget {
   provider: string;
   /** Model id, e.g. `deepseek-v4.1-flash`. */
   model: string;
-  /** Absolute chat-completions URL, e.g. `https://opencode.ai/inference/go/openai/v1/chat/completions`. */
+  /** Absolute chat-completions URL. */
   url: string;
   /** Bearer token used for probe requests. Never persisted. */
   apiKey: string;
@@ -34,42 +34,54 @@ export interface ProbeTarget {
 }
 
 /**
- * A session id that was measured to be fast.
+ * One **spare** verified id sitting in the pool, waiting to be taken.
  *
- * Entries are scoped to a `provider|model` pair because the upstream a session
- * id maps to can differ per model. `upstreamMs`/`verifiedAt` describe the most
- * recent successful measurement.
+ * The pool never recycles ids: when a conversation takes an entry the entry
+ * leaves `entries` and becomes part of a {@link Binding}. When that
+ * conversation is gone the id is retired, not returned.
  */
 export interface PoolEntry {
   id: string;
   provider: string;
   model: string;
-  /** `server-timing: upstream;dur=...` from the last measurement. */
+  /** `server-timing: upstream;dur=...` from the verification probe. */
   upstreamMs: number;
-  /** Epoch millis of the last successful measurement. */
+  /** Epoch millis of the verification probe. */
   verifiedAt: number;
-  /** Epoch millis the id was first accepted into the pool. */
+  /** Epoch millis the id was accepted into the pool. */
   createdAt: number;
-  /** Consecutive slow/overloaded observations; quarantine at `quarantineFailures`. */
-  failures: number;
 }
 
 /**
- * Sticky mapping from a pi conversation to one pooled session id.
+ * A routed id owned by exactly one conversation.
  *
  * The key is `piSessionId|provider|model`, so switching model mid-conversation
- * gets its own (still sticky) routed id.
+ * gets its own (still exclusive) routed id. The binding carries its own
+ * measurements: it is the only record of the id once it leaves the pool.
  */
 export interface Binding {
   routedId: string;
   provider: string;
   model: string;
   boundAt: number;
-  /** Refreshed on every acquire, used for lease expiry. */
+  /** Refreshed by every real response; drives lease expiry. */
   lastSeenAt: number;
+  /** Last `upstream;dur` observed on a real request. */
+  upstreamMs: number;
+  /** Epoch millis of the last real observation. */
+  verifiedAt: number;
+  /** Consecutive degraded observations. */
+  failures: number;
 }
 
-/** On-disk pool state. Contains no secrets and no base URLs. */
+/**
+ * On-disk pool state. Contains no secrets and no base URLs.
+ *
+ * Invariants:
+ *  - `entries` holds only unowned (spare) ids.
+ *  - every `bindings[*].routedId` is absent from `entries`.
+ *  - an id is never handed to a second conversation.
+ */
 export interface PoolState {
   version: 1;
   entries: PoolEntry[];
@@ -91,7 +103,7 @@ export interface ProbeResult {
   status: number;
   upstreamMs?: number;
   gatewayMs?: number;
-  /** Response `id` (`gw-...` for OpenCode's own workers, `chatcmpl-...` for the slow relay). */
+  /** Response `id` (`gw-...` for OpenCode's workers, `chatcmpl-...` for the overloaded relay). */
   bodyId?: string;
   /** Machine-readable reason, used for debug logs. */
   reason: ProbeReason;
