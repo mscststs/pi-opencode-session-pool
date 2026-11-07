@@ -1,6 +1,6 @@
 {
   "name": "@mscststs/pi-opencode-session-pool",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pi extension that pins every OpenCode request to a pre-verified fast-routing session id, so a new conversation never lands on OpenCode's overloaded upstream shard.",
   "type": "module",
   "license": "MIT",
