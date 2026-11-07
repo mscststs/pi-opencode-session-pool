@@ -15,7 +15,7 @@ process.
 
 ```
 before:   new pi session -> random uuid -> 50% chance of a 30s first token
-after:    new pi session -> pooled fast id -> ~1s first token
+after:    new pi session -> a verified spare   -> ~1s first token
 ```
 
 ## Measured evidence
@@ -49,10 +49,10 @@ returns `chatcmpl-…`. Both signals are used to classify a probe.
 
 | Phase | Hook | What happens |
 | --- | --- | --- |
-| Start | `session_start` | Bind the conversation to a pooled id (bounded by `PI_OCPOOL_STARTUP_BUDGET_MS`). |
-| Request | `before_provider_headers` | Override `x-opencode-session`; lazily bind if the model changed mid-conversation. |
-| Response | `after_provider_response` | Read `server-timing`; refresh stats, quarantine ids that turn slow. |
-| Background | interval timer | Re-verify stale ids and top the pool up to `PI_OCPOOL_SIZE`. |
+| Start | `session_start` | Take a spare for the conversation (probe only if the pool is empty), bounded by `PI_OCPOOL_STARTUP_BUDGET_MS`. |
+| Request | `before_provider_headers` | Override `x-opencode-session`; lazily acquire if the model changed mid-conversation. |
+| Response | `after_provider_response` | Read `server-timing`; refresh the binding, retire the id when it turns slow. |
+| Background | timers | Refill spares after a take (`PI_OCPOOL_REFILL_DELAY_MS`) and every `PI_OCPOOL_REFRESH_INTERVAL_MS`; re-verify stale spares. |
 | Shutdown | `session_shutdown` | Stop the timer on `quit` (reloads keep the warm process-level pool). |
 
 The pool has exactly three operations — **probe**, **take**, **refill** — and no
@@ -94,7 +94,7 @@ still works from memory.
 
 ```bash
 # local checkout (loaded in place, no copy)
-pi install ./repo/pi-opencode-session-pool
+pi install ~/repo/pi-opencode-session-pool
 
 # or from git / npm once published
 pi install git:github.com/<you>/pi-opencode-session-pool@v0.1.0
@@ -111,7 +111,7 @@ All settings are environment variables (same convention as the sibling
 | --- | --- | --- |
 | `PI_OCPOOL` | `1` | Master switch. `0` disables the extension entirely. |
 | `PI_OCPOOL_SIZE` | `3` | Verified-fast **spare** ids kept per provider+model (`1`-`16`). |
-| `PI_OCPOOL_TTL_MS` | `1800000` | Re-verify pooled ids older than this. |
+| `PI_OCPOOL_TTL_MS` | `1800000` | Re-verify spare ids older than this. |
 | `PI_OCPOOL_MAX_UPSTREAM_MS` | `2500` | Probe ceiling that still counts as "fast". |
 | `PI_OCPOOL_PROBE_TIMEOUT_MS` | `10000` | Abort one probe after this; slow ids take much longer. |
 | `PI_OCPOOL_STARTUP_BUDGET_MS` | `6000` | Max time `session_start` may spend binding. `0` = never block. |
@@ -119,19 +119,19 @@ All settings are environment variables (same convention as the sibling
 | `PI_OCPOOL_REFRESH_INTERVAL_MS` | `300000` | Background refresh cadence. `0` disables the timer. |
 | `PI_OCPOOL_REFILL_DELAY_MS` | `15000` | Delay before refilling after a spare is taken; `0` disables eager refill. |
 | `PI_OCPOOL_MIN_PROBE_INTERVAL_MS` | `750` | Minimum spacing between probes. |
-| `PI_OCPOOL_LEASE_TTL_MS` | `28800000` | Idle time after which a binding releases its id. |
-| `PI_OCPOOL_QUARANTINE_FAILURES` | `2` | Degraded real requests before an id is evicted. |
+| `PI_OCPOOL_LEASE_TTL_MS` | `28800000` | Idle time after which a conversation's id is retired (never returns to the pool). |
+| `PI_OCPOOL_QUARANTINE_FAILURES` | `2` | Degraded real requests before an id is retired. |
 | `PI_OCPOOL_DEGRADE_MS` | `6000` | Real-request upstream latency that counts as one strike. |
-| `PI_OCPOOL_QUARANTINE_MS` | `8000` | One-shot latency that evicts immediately. |
+| `PI_OCPOOL_QUARANTINE_MS` | `8000` | One-shot latency that retires the id immediately. |
 | `PI_OCPOOL_MAX_BINDINGS` | `256` | Cap on persisted bindings. |
 | `PI_OCPOOL_REQUIRE_GATEWAY_ID` | `1` | Require the response `id` to start with `gw-`. |
 | `PI_OCPOOL_STATE_PATH` | `~/.pi/opencode-session-pool.json` | State file location. |
-| `PI_OCPOOL_DEBUG` | `0` | Verbose stderr logging of bind/probe/evict decisions. |
+| `PI_OCPOOL_DEBUG` | `0` | Verbose stderr logging of take/probe/refill/retire decisions. |
 
 Example:
 
 ```bash
-PI_OCPOOL_DEBUG=1 PI_OCPOOL_SIZE=4 pi -e ./repo/pi-opencode-session-pool
+PI_OCPOOL_DEBUG=1 PI_OCPOOL_SIZE=4 pi -e ~/repo/pi-opencode-session-pool
 ```
 
 ## Inspecting and seeding
@@ -140,10 +140,14 @@ These live in the package's `scripts/` directory (run them from a source
 checkout after `npm install`):
 
 ```bash
-npm run pool:inspect          # pretty-print the state file (read-only)
+npm run pool:inspect          # spares + owned ids, read-only
 npm run pool:live             # probe 2 real candidates and print timings
-npm run pool:live -- --seed   # probe and append the fast ids to the pool
+npm run pool:live -- --seed   # probe and add the fast ids as spares
 ```
+
+The state file holds two disjoint sets: `entries` (verified spares waiting to be
+taken) and `bindings` (one owned id per conversation). An id moves from the
+first to the second exactly once, and is retired when the conversation ends.
 
 `pool:live` uses `OPENCODE_API_KEY` or the `opencode` entry in
 `~/.pi/agent/auth.json`.
@@ -158,10 +162,13 @@ npm run pool:live -- --seed   # probe and append the fast ids to the pool
   are scoped per provider+model.
 - The pool cannot make a healthy route faster; it only avoids the broken one.
   If every upstream shard is slow, probes fail and pi's own id is used.
-- Probes are real (1-token) requests. The defaults keep them well under 10 per
-  hour per model; raise `PI_OCPOOL_SIZE` or lower `PI_OCPOOL_TTL_MS` only if you
-  understand the extra traffic. OpenCode monitors traffic for abuse, so avoid
-  aggressive best-of-N probing.
+- Probes are real (1-token) requests: roughly one per new conversation (to
+  replace the spare it took), plus at most `2 × PI_OCPOOL_SIZE` per refresh
+  cycle (about six per hour per model at the defaults, and none while every
+  spare is fresh). OpenCode
+  monitors traffic for abuse, so avoid aggressive best-of-N probing: raise
+  `PI_OCPOOL_SIZE` or lower `PI_OCPOOL_TTL_MS` only if you understand the extra
+  traffic.
 
 ## Development
 
