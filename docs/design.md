@@ -27,7 +27,28 @@ conversation has roughly a 50% chance of landing on the slow shard. The fix is
 not a network tweak — a direct connection (bypassing the proxy entirely) showed
 the same 22–23 s stalls — but choosing the routing key.
 
-## 2. The two observable signals
+### 2026-11-11 revision
+
+That sticky-shard model no longer holds. Re-measuring the same endpoint on
+2026-11-11:
+
+- one id probed 5 times returned `1 435`, `5 138`, `1 435`, `1 593`, `2 185 ms`
+  with a different `chatcmpl-…` body id each time;
+- another id probed 4 times returned `3 574`–`6 309 ms` through four different
+  `gw-<worker>-…` ids;
+- fast responses (`388`–`1 585 ms`) came back as `chatcmpl-…`, plain hex ids and
+  `gw-…`, in no stable order.
+
+OpenCode now load-balances requests across workers. The same id does not select
+a shard, so no pooled id can guarantee a fast next request. `x-opencode-session`
+is still mandatory (omitting it returns HTTP 400), and OpenCode's own client
+also sends `x-session-affinity`, `X-Session-Id`, `x-opencode-project` and
+`x-opencode-session-id`; probing with those headers did not restore stickiness.
+
+The extension therefore keeps the pool as an opportunistic cache, but no longer
+assumes that a fast probe predicts a fast request.
+
+## 2. The observable signals
 
 Every gateway response carries:
 
@@ -40,12 +61,13 @@ x-zen-model: deepseek-v4.1-flash
 
 - `gateway;dur` is the gateway's own processing time (8–142 ms observed).
 - `upstream;dur` is the model backend time, and it is the whole story.
-- The body `id` prefix distinguishes `gw-*` (fast worker) from `chatcmpl-*`
-  (overloaded relay).
+- The body `id` prefix was a route signal on 2026-11-07 (`gw-*` = fast,
+  `chatcmpl-*` = slow). Since 2026-11-11 it is not: fast responses can be either
+  form. `PI_OCPOOL_REQUIRE_GATEWAY_ID` now defaults to `0` and is kept only for
+  diagnosing another future rename.
 
-A probe classifies on `upstream;dur <= PI_OCPOOL_MAX_UPSTREAM_MS` and, by
-default, also requires `id` to start with `gw-`. If a proxy strips
-`server-timing`, wall-clock time is used instead.
+A probe classifies on `upstream;dur <= PI_OCPOOL_MAX_UPSTREAM_MS`. If a proxy
+strips `server-timing`, wall-clock time is used instead.
 
 Probe requests are ordinary 1-token completions (`max_tokens: 1`, prompt `OK`).
 They measure the same first-token latency the real request will see and they
@@ -60,6 +82,21 @@ probe:   randomUUID() -> 1-token request -> if fast: push to entries (spare)
 take:    pop the best fresh spare -> binding[key] = id     (entries shrinks)
 refill:  while fresh spares < PI_OCPOOL_SIZE: probe -> push to entries
 ```
+
+Synchronous probing is off by default (`PI_OCPOOL_STARTUP_BUDGET_MS=0`,
+`PI_OCPOOL_REQUEST_BUDGET_MS=0`). A request may still **take** a fresh spare,
+which is a local state-file read and a locked mutation, never a network call.
+`session_start` schedules `warmup()` without awaiting it, so the pool fills in
+the background.
+
+With a zero budget, a stale spare is intentionally left alone: `probeWithin`
+would report a synthetic timeout and the spare would be dropped for no reason.
+Background refresh re-verifies stale spares later.
+
+If a caller opts into a non-zero budget and the acquisition fails, the key
+enters a `PI_OCPOOL_PROBE_COOLDOWN_MS` (default 60 s) cooldown so the next turn
+does not pay the same budget again. This is what turns a bad classifier or a
+temporarily slow gateway from "every turn waits 4–6 s" into "one turn waits".
 
 Invariants:
 
@@ -212,7 +249,8 @@ are trying to protect.
 ## 8. Background refresh
 
 Every `PI_OCPOOL_REFRESH_INTERVAL_MS` (default 5 min), plus
-`PI_OCPOOL_REFILL_DELAY_MS` (default 15 s) after a spare is taken:
+`PI_OCPOOL_REFILL_DELAY_MS` (default 15 s) after a spare is taken or after
+`session_start`:
 
 1. prune expired/idle bindings (`pruneState`);
 2. re-verify **stale spares only** — pruning the id when it is no longer fast,
@@ -223,9 +261,10 @@ Every `PI_OCPOOL_REFRESH_INTERVAL_MS` (default 5 min), plus
 Ids owned by a live conversation are never re-probed: that conversation's real
 traffic validates them for free. At most `2 × size` probes run per cycle.
 
-The refresh timer is created on `session_start` and `unref()`'d so it never
-keeps the process alive. It is deliberately *not* fired at startup: `bind()`
-already acquires what the current conversation needs.
+Both the periodic timer and the startup warmup timer are `unref()`'d so they
+never keep a short-lived process (`pi -p`) alive. The warmup is deliberately
+delayed by `PI_OCPOOL_REFILL_DELAY_MS` so it does not compete with the first
+request; interactive sessions get a warm pool, one-shot runs simply exit.
 
 ## 9. Failure modes
 
@@ -261,10 +300,16 @@ surface: it observes the real response headers and only rewrites one header.
   request; lower it if you start conversations back to back.
 - Lower `PI_OCPOOL_TTL_MS` only if the gateway reshuffles upstreams often;
   re-verification is cheap but not free.
-- `PI_OCPOOL_STARTUP_BUDGET_MS=0` makes startup instant and defers binding to
-  the first request (`PI_OCPOOL_REQUEST_BUDGET_MS`).
-- `PI_OCPOOL_REQUIRE_GATEWAY_ID=0` relaxes classification to latency only, which
-  is useful if OpenCode renames its response id prefixes.
+- Leave `PI_OCPOOL_STARTUP_BUDGET_MS` and `PI_OCPOOL_REQUEST_BUDGET_MS` at `0`
+  unless you have measured a gateway with sticky routing again. A non-zero
+  budget spends up to that long before a turn's request leaves pi when no fast
+  id is available.
+- If you re-enable synchronous probing, keep
+  `PI_OCPOOL_PROBE_COOLDOWN_MS` non-zero so a failing gateway cannot tax every
+  turn.
+- Leave `PI_OCPOOL_REQUIRE_GATEWAY_ID=0`; the response id prefix is not a route
+  signal since 2026-11-11. Set it to `1` only to reproduce the old false
+  rejections with `npm run pool:diagnose`.
 - Raise `PI_OCPOOL_DEGRADE_MS` if you routinely work with very large contexts
   (where several seconds of prefill is normal); lower it if you want the pool
   to react to milder degradation.

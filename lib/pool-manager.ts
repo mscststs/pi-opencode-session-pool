@@ -94,6 +94,7 @@ export class PoolManager {
   private readonly targets = new Map<string, ProbeTarget>();
   private readonly inflight = new Map<string, Promise<string | undefined>>();
   private readonly touchedAt = new Map<string, number>();
+  private readonly cooldownUntil = new Map<string, number>();
   private lastProbeAt = 0;
   private blockedUntil = 0;
   private lastPersistAt = 0;
@@ -138,6 +139,20 @@ export class PoolManager {
     if (existing) return existing;
 
     const pending = this.acquire(key, target, budgetMs)
+      .then((routed) => {
+        if (routed) {
+          this.cooldownUntil.delete(key);
+          return routed;
+        }
+        // A synchronous acquisition that burned a probe budget must not be
+        // repeated on the next turn. This matters whenever a caller opts into
+        // a non-zero request/startup budget: without it a conversation with no
+        // pooled id pays that budget on every single request.
+        if (budgetMs >= MIN_PROBE_BUDGET_MS && this.config.probeCooldownMs > 0) {
+          this.cooldownUntil.set(key, this.now() + this.config.probeCooldownMs);
+        }
+        return undefined;
+      })
       .catch((error: unknown) => {
         this.log.debug(`bind ${key} failed: ${(error as Error)?.message ?? String(error)}`);
         return undefined;
@@ -181,6 +196,24 @@ export class PoolManager {
     }, this.config.refreshIntervalMs);
     timer.unref?.();
     this.timer = timer;
+  }
+
+  /**
+   * Schedule a background refill without blocking the caller.
+   *
+   * The timer is unref'd, so a short-lived process (for example `pi -p`) can
+   * exit without waiting for probes. Interactive sessions keep the event loop
+   * alive and get a warm pool after the refill delay.
+   */
+  warmup(): void {
+    if (this.refillTimer !== undefined) return;
+    const delay = Math.max(this.config.refillDelayMs, 1_000);
+    const timer = this.setTimeoutImpl(() => {
+      this.refillTimer = undefined;
+      void this.refresh();
+    }, delay);
+    timer.unref?.();
+    this.refillTimer = timer;
   }
 
   /** Stop the timers (called on `session_shutdown` for `quit`). */
@@ -263,6 +296,15 @@ export class PoolManager {
         `took spare id=${spare.id} upstream=${Math.round(spare.upstreamMs)}ms for ${target.provider}/${target.model}`,
       );
       return spare.id;
+    }
+
+    // Without a probe budget there is nothing more to do synchronously. In
+    // particular, do not "verify" a stale spare: `probeWithin` would report a
+    // synthetic timeout and the spare would be dropped for no reason.
+    if (budgetMs < MIN_PROBE_BUDGET_MS) return undefined;
+    if ((this.cooldownUntil.get(key) ?? 0) > now) {
+      this.log.debug(`skip probing ${target.provider}/${target.model}: ${key} is cooling down`);
+      return undefined;
     }
 
     // 3. A stale spare: verify that exact id before handing it out. Re-using a

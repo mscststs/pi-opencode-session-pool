@@ -6,9 +6,11 @@ import {
   DEFAULT_MAX_UPSTREAM_MS,
   DEFAULT_MIN_PROBE_INTERVAL_MS,
   DEFAULT_POOL_SIZE,
+  DEFAULT_PROBE_COOLDOWN_MS,
   DEFAULT_PROBE_TIMEOUT_MS,
   DEFAULT_QUARANTINE_FAILURES,
   DEFAULT_REFILL_DELAY_MS,
+  DEFAULT_REQUIRE_GATEWAY_ID,
   DEFAULT_REFRESH_INTERVAL_MS,
   DEFAULT_REQUEST_BUDGET_MS,
   DEFAULT_STARTUP_BUDGET_MS,
@@ -25,13 +27,14 @@ test("defaults: enabled, three ids, short probe timeout", () => {
   assert.equal(config.probeTimeoutMs, DEFAULT_PROBE_TIMEOUT_MS);
   assert.equal(config.startupBudgetMs, DEFAULT_STARTUP_BUDGET_MS);
   assert.equal(config.requestBudgetMs, DEFAULT_REQUEST_BUDGET_MS);
+  assert.equal(config.probeCooldownMs, DEFAULT_PROBE_COOLDOWN_MS);
   assert.equal(config.refreshIntervalMs, DEFAULT_REFRESH_INTERVAL_MS);
   assert.equal(config.minProbeIntervalMs, DEFAULT_MIN_PROBE_INTERVAL_MS);
   assert.equal(config.leaseTtlMs, DEFAULT_LEASE_TTL_MS);
   assert.equal(config.quarantineFailures, DEFAULT_QUARANTINE_FAILURES);
   assert.equal(config.degradeMs, DEFAULT_DEGRADE_MS);
   assert.equal(config.refillDelayMs, DEFAULT_REFILL_DELAY_MS);
-  assert.equal(config.requireGatewayId, true);
+  assert.equal(config.requireGatewayId, DEFAULT_REQUIRE_GATEWAY_ID);
   assert.equal(config.debug, false);
   assert.equal(config.statePath, "/home/tester/.pi/opencode-session-pool.json");
 });
@@ -57,6 +60,8 @@ test("numeric options are parsed, clamped and validated", () => {
 
   assert.equal(readConfig({ PI_OCPOOL_STARTUP_BUDGET_MS: "-5" }).startupBudgetMs, 0);
   assert.equal(readConfig({ PI_OCPOOL_REQUEST_BUDGET_MS: "-5" }).requestBudgetMs, 0);
+  assert.equal(readConfig({ PI_OCPOOL_PROBE_COOLDOWN_MS: "-5" }).probeCooldownMs, 0);
+  assert.equal(readConfig({ PI_OCPOOL_PROBE_COOLDOWN_MS: "5000" }).probeCooldownMs, 5000);
   assert.equal(readConfig({ PI_OCPOOL_REFRESH_INTERVAL_MS: "0" }).refreshIntervalMs, 0);
   assert.equal(readConfig({ PI_OCPOOL_REFILL_DELAY_MS: "0" }).refillDelayMs, 0);
   assert.equal(readConfig({ PI_OCPOOL_REFILL_DELAY_MS: "-5" }).refillDelayMs, 0);

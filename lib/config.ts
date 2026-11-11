@@ -24,11 +24,42 @@ export const DEFAULT_MAX_UPSTREAM_MS = 2_500;
 /** Abort a probe after this long: anything slower is already disqualified. */
 export const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
 
-/** Max time `session_start` may spend filling the pool. */
-export const DEFAULT_STARTUP_BUDGET_MS = 6_000;
+/**
+ * Max time `session_start` may spend filling the pool.
+ *
+ * Zero by default: filling the pool must never delay the first prompt. A
+ * background refresh is kicked off instead.
+ */
+export const DEFAULT_STARTUP_BUDGET_MS = 0;
 
-/** Max time the first provider request may spend filling the pool. */
-export const DEFAULT_REQUEST_BUDGET_MS = 4_000;
+/**
+ * Max time a provider request may spend filling the pool.
+ *
+ * Zero by default. On 2026-11-11 OpenCode began load-balancing each request
+ * across upstream workers instead of keeping a session pinned to one shard, so
+ * a probe no longer predicts the latency of the request that follows it. When
+ * every candidate is rejected, a synchronous probe is pure added TTFT; the
+ * background refresh does the same work without blocking a turn.
+ */
+export const DEFAULT_REQUEST_BUDGET_MS = 0;
+
+/**
+ * After a synchronous acquisition fails, wait this long before trying again.
+ *
+ * Only relevant when `PI_OCPOOL_REQUEST_BUDGET_MS`/`STARTUP_BUDGET_MS` are set
+ * above zero: it stops a conversation with no pooled id from paying the probe
+ * budget on every single turn.
+ */
+export const DEFAULT_PROBE_COOLDOWN_MS = 60_000;
+
+/**
+ * Require the response body id to start with `gw-`.
+ *
+ * Legacy heuristic from 2026-11-07. Since 2026-11-11 fast responses also come
+ * back with `chatcmpl-…` and plain ids, so this default would reject healthy
+ * routes. Kept as an opt-in for investigating a future gateway change.
+ */
+export const DEFAULT_REQUIRE_GATEWAY_ID = false;
 
 /** Background refresh cadence. */
 export const DEFAULT_REFRESH_INTERVAL_MS = 5 * 60_000;
@@ -82,10 +113,12 @@ export interface PoolConfig {
   maxUpstreamMs: number;
   /** Per-probe abort timeout. */
   probeTimeoutMs: number;
-  /** Budget for filling the pool during `session_start`. */
+  /** Budget for filling the pool during `session_start` (0 = never block). */
   startupBudgetMs: number;
-  /** Budget for filling the pool on the first provider request. */
+  /** Budget for filling the pool on a provider request (0 = never block). */
   requestBudgetMs: number;
+  /** Cooldown after a failed synchronous acquisition (0 = disabled). */
+  probeCooldownMs: number;
   /** Background refresh interval (`0` disables the timer). */
   refreshIntervalMs: number;
   /** Delay before topping the pool up after a take (`0` disables eager refill). */
@@ -136,8 +169,9 @@ function isFalsy(value: string | undefined): boolean {
  * | `PI_OCPOOL_TTL_MS`                | `1800000`                   | Re-verify ids older than this.              |
  * | `PI_OCPOOL_MAX_UPSTREAM_MS`       | `2500`                      | Latency ceiling for "fast".                 |
  * | `PI_OCPOOL_PROBE_TIMEOUT_MS`      | `10000`                     | Abort a probe after this long.              |
- * | `PI_OCPOOL_STARTUP_BUDGET_MS`     | `6000`                      | Pool-fill budget on session start.          |
- * | `PI_OCPOOL_REQUEST_BUDGET_MS`     | `4000`                      | Pool-fill budget on first request.          |
+ * | `PI_OCPOOL_STARTUP_BUDGET_MS`     | `0`                         | Pool-fill budget on session start.          |
+ * | `PI_OCPOOL_REQUEST_BUDGET_MS`     | `0`                         | Pool-fill budget on a request.              |
+ * | `PI_OCPOOL_PROBE_COOLDOWN_MS`     | `60000`                     | Retry delay after a failed sync acquisition. |
  * | `PI_OCPOOL_REFRESH_INTERVAL_MS`   | `300000`                    | Background refresh cadence; `0` disables.   |
  * | `PI_OCPOOL_REFILL_DELAY_MS`        | `15000`                     | Refill delay after taking a spare.          |
  * | `PI_OCPOOL_MIN_PROBE_INTERVAL_MS` | `750`                       | Minimum spacing between probes.             |
@@ -146,7 +180,7 @@ function isFalsy(value: string | undefined): boolean {
  * | `PI_OCPOOL_DEGRADE_MS`            | `6000`                      | Real upstream latency that counts as a hit. |
  * | `PI_OCPOOL_QUARANTINE_MS`         | `8000`                      | One-shot latency that evicts immediately.   |
  * | `PI_OCPOOL_MAX_BINDINGS`          | `256`                       | Cap on persisted bindings.                  |
- * | `PI_OCPOOL_REQUIRE_GATEWAY_ID`    | `1`                         | Require `id` starting with `gw-`.           |
+ * | `PI_OCPOOL_REQUIRE_GATEWAY_ID`    | `0`                         | Legacy: require `id` starting with `gw-`.   |
  * | `PI_OCPOOL_STATE_PATH`            | `~/.pi/opencode-session-pool.json` | State file location.                 |
  * | `PI_OCPOOL_DEBUG`                 | `0`                         | Verbose stderr logging.                     |
  */
@@ -167,6 +201,10 @@ export function readConfig(env: Env = process.env, home: string = homedir()): Po
     requestBudgetMs: Math.max(
       0,
       parseInteger(env.PI_OCPOOL_REQUEST_BUDGET_MS, DEFAULT_REQUEST_BUDGET_MS),
+    ),
+    probeCooldownMs: Math.max(
+      0,
+      parseInteger(env.PI_OCPOOL_PROBE_COOLDOWN_MS, DEFAULT_PROBE_COOLDOWN_MS),
     ),
     refreshIntervalMs: Math.max(
       0,
@@ -192,7 +230,10 @@ export function readConfig(env: Env = process.env, home: string = homedir()): Po
       parseInteger(env.PI_OCPOOL_QUARANTINE_MS, DEFAULT_QUARANTINE_MS),
     ),
     maxBindings: Math.max(8, parseInteger(env.PI_OCPOOL_MAX_BINDINGS, DEFAULT_MAX_BINDINGS)),
-    requireGatewayId: !isFalsy(env.PI_OCPOOL_REQUIRE_GATEWAY_ID),
+    requireGatewayId:
+      env.PI_OCPOOL_REQUIRE_GATEWAY_ID === undefined
+        ? DEFAULT_REQUIRE_GATEWAY_ID
+        : !isFalsy(env.PI_OCPOOL_REQUIRE_GATEWAY_ID),
     statePath:
       env.PI_OCPOOL_STATE_PATH?.trim() || join(home, ".pi", "opencode-session-pool.json"),
     debug: env.PI_OCPOOL_DEBUG === "1",

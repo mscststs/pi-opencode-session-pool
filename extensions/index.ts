@@ -93,7 +93,14 @@ async function resolveTargetFor(
   }
 
   return resolveTarget(
-    { id: active.id, provider: active.provider, api: active.api, baseUrl: active.baseUrl },
+    {
+      id: active.id,
+      provider: active.provider,
+      api: active.api,
+      // pi 1.5.2 lets request-time auth override the base URL; probe the URL
+      // the real request will actually use, not the catalogue entry.
+      baseUrl: auth.baseUrl ?? active.baseUrl,
+    },
     { apiKey: auth.apiKey, headers },
   );
 }
@@ -119,6 +126,11 @@ export default function opencodeSessionPool(pi: ExtensionAPI): void {
           ? `session ${ctx.sessionManager.getSessionId()} pinned to ${routed} (${target.provider}/${target.model})`
           : `session ${ctx.sessionManager.getSessionId()} has no pooled id yet; pi's id stays in place`,
       );
+      // Refill later, in the background. Never await this: a probe that is
+      // slower than the gateway is allowed to be a wasted request, not added
+      // first-token latency. The timer is unref'd so `pi -p` can exit without
+      // waiting for it.
+      manager.warmup();
     } catch (error) {
       log.debug(`session_start failed: ${(error as Error)?.message ?? String(error)}`);
     }

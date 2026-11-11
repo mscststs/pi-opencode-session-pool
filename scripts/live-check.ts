@@ -13,6 +13,10 @@
  *   npx tsx scripts/live-check.ts --model deepseek-v4.1-flash \
  *       --base-url https://opencode.ai/inference/go/openai/v1
  *
+ * Add `--provider opencode-go` if your pi models.json uses that provider id;
+ * pool entries are scoped by provider, so it must match. The default is
+ * `opencode`.
+ *
  * Auth: `OPENCODE_API_KEY`, or the `opencode` entry in `~/.pi/agent/auth.json`.
  */
 import { randomUUID } from "node:crypto";
@@ -30,6 +34,7 @@ function arg(name: string, fallback?: string): string | undefined {
 
 const count = Number.parseInt(arg("count", "2") ?? "2", 10);
 const model = arg("model", "deepseek-v4.1-flash") as string;
+const provider = arg("provider", "opencode") as string;
 const baseUrl = arg("base-url", "https://opencode.ai/inference/go/openai/v1") as string;
 const seed = process.argv.includes("--seed");
 const poolPath =
@@ -53,14 +58,16 @@ if (!apiKey) {
 }
 
 const target: ProbeTarget = {
-  provider: "opencode-go",
+  provider,
   model,
   url: `${baseUrl.replace(/\/+$/, "")}/chat/completions`,
   apiKey,
 };
 
 const prober = createProber({
-  config: { probeTimeoutMs: 15_000, maxUpstreamMs: 2_500, requireGatewayId: true },
+  // Do not gate on the body-id prefix: since 2026-11-11 fast responses also
+  // come back as chatcmpl-… / plain ids. The latency is the signal.
+  config: { probeTimeoutMs: 15_000, maxUpstreamMs: 2_500, requireGatewayId: false },
   log: { debug: (message) => console.error(`  ${message}`) },
 });
 

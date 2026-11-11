@@ -208,6 +208,47 @@ test("gives up when the budget runs out without a fast candidate", async () => {
   assert.ok(calls.length >= 2, `expected several probes, got ${calls.length}`);
 });
 
+test("a zero-budget bind leaves stale spares for the background refresh", async () => {
+  const { manager, store, calls } = await harness({
+    state: stateWith([spare("spare-1", { verifiedAt: NOW - 60 * 60_000 })]),
+    config: { ttlMs: 30 * 60_000 },
+  });
+
+  assert.equal(await manager.bind(key("s1"), target, 0), undefined);
+  assert.deepEqual(calls, [], "no probe budget means no probe");
+  const persisted = await store.load();
+  assert.deepEqual(persisted.entries.map((entry) => entry.id), ["spare-1"], "the stale spare is not dropped");
+});
+
+test("a failed synchronous acquisition is not retried on the next request", async () => {
+  const { manager, calls, clock } = await harness({
+    plan: [{ fast: false, reason: "slow" }],
+    config: { probeCooldownMs: 60_000 },
+  });
+
+  assert.equal(await manager.bind(key("s1"), target, 1_500), undefined);
+  assert.equal(calls.length, 1);
+
+  assert.equal(await manager.bind(key("s1"), target, 1_500), undefined);
+  assert.equal(calls.length, 1, "the cooldown suppresses the second probe burst");
+
+  clock.value += 60_000;
+  assert.equal(await manager.bind(key("s1"), target, 1_500), undefined);
+  assert.equal(calls.length, 2, "probing resumes after the cooldown");
+});
+
+test("a successful acquisition clears the cooldown", async () => {
+  const { manager, calls, clock } = await harness({
+    plan: [{ fast: false, reason: "slow" }, { fast: true }],
+    config: { probeCooldownMs: 60_000 },
+  });
+
+  assert.equal(await manager.bind(key("s1"), target, 1_500), undefined);
+  clock.value += 60_000;
+  assert.equal(await manager.bind(key("s1"), target, 1_500), "cand-2");
+  assert.equal(calls.length, 2);
+});
+
 test("a stale spare is re-verified and taken", async () => {
   const { manager, calls } = await harness({
     plan: [{ fast: true, upstreamMs: 800 }],
@@ -300,6 +341,15 @@ test("taking a spare schedules a refill", async () => {
   });
 
   await manager.bind(key("s1"), target, 0);
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0]?.delayMs, 15_000);
+});
+
+test("warmup schedules one background refresh without blocking", async () => {
+  const { manager, timers } = await harness({ config: { refillDelayMs: 15_000 } });
+
+  manager.warmup();
+  manager.warmup();
   assert.equal(timers.length, 1);
   assert.equal(timers[0]?.delayMs, 15_000);
 });
